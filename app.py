@@ -434,18 +434,20 @@ def kpi_cards(df: pd.DataFrame):
 
 
 def charts(df: pd.DataFrame):
+    import hashlib
+
     plot_df = df.copy()
 
-    # Normalize and filter OK
+    # Normalize status and keep only ok
     if "status" in plot_df.columns:
         plot_df["status"] = plot_df["status"].astype(str).str.strip().str.lower()
         plot_df = plot_df[plot_df["status"] == "ok"].copy()
 
     if plot_df.empty:
-        st.warning("No rows with status='ok' to plot. Check errors in the table.")
+        st.warning("No rows with status='ok' to plot. Check the results table for errors.")
         return
 
-    # Ensure required columns
+    # Ensure columns exist
     if "mode" not in plot_df.columns:
         plot_df["mode"] = "run"
     if "parser_mode_requested" not in plot_df.columns:
@@ -453,11 +455,14 @@ def charts(df: pd.DataFrame):
     if "sample_id" not in plot_df.columns:
         plot_df["sample_id"] = plot_df.index.astype(str)
 
-    # Coerce numerics (MAIN FIX)
+    # Coerce numerics (critical)
     for col in ["comfort_violation_minutes", "dr_compliance_score", "hvac_on_hours"]:
         if col in plot_df.columns:
             plot_df[col] = pd.to_numeric(plot_df[col], errors="coerce")
 
+    # -----------------------------
+    # Per-sample bars
+    # -----------------------------
     st.markdown("<div class='section'>Per-sample charts</div>", unsafe_allow_html=True)
     c1, c2 = st.columns(2)
 
@@ -489,37 +494,84 @@ def charts(df: pd.DataFrame):
         else:
             st.info("No numeric dr_compliance_score values to plot.")
 
+    # -----------------------------
+    # Tradeoff scatter (FIXED)
+    # -----------------------------
     st.markdown("<div class='section'>Tradeoff</div>", unsafe_allow_html=True)
 
     needed = {"comfort_violation_minutes", "dr_compliance_score"}
     if not needed.issubset(plot_df.columns):
         st.error(f"Missing columns for tradeoff plot: {needed - set(plot_df.columns)}")
-        st.info("Make sure your runner produces comfort_violation_minutes and dr_compliance_score.")
         return
 
-    scatter_df = plot_df.dropna(subset=["comfort_violation_minutes", "dr_compliance_score"]).copy()
+    base = plot_df.dropna(subset=["comfort_violation_minutes", "dr_compliance_score"]).copy()
 
-    if scatter_df.empty:
+    if base.empty:
         st.warning(
-            "Tradeoff plot has no points because comfort_violation_minutes or dr_compliance_score are empty/non-numeric.\n"
-            "Open the results table and verify those columns contain numbers."
+            "Tradeoff plot has no points because comfort_violation_minutes or dr_compliance_score are empty/non-numeric."
         )
-        with st.expander("Debug (types + sample rows)"):
-            st.write(plot_df[["sample_id", "comfort_violation_minutes", "dr_compliance_score", "status"]].head(20))
+        with st.expander("Debug (show first rows + dtypes)"):
+            st.write(plot_df.head(20))
             st.write(plot_df.dtypes)
         return
 
-    sc = alt.Chart(scatter_df).mark_circle(size=120).encode(
-        x=alt.X("comfort_violation_minutes:Q", title="Comfort violation (min)"),
-        y=alt.Y("dr_compliance_score:Q", title="DR compliance", scale=alt.Scale(domain=[0, 1])),
+    # Count duplicates to explain “missing dots”
+    dup_counts = (
+        base.groupby(["comfort_violation_minutes", "dr_compliance_score"])
+        .size()
+        .reset_index(name="count")
+        .sort_values("count", ascending=False)
+    )
+    st.caption(
+        f"Tradeoff points available: {len(base)} rows • Unique coordinates: {len(dup_counts)} "
+        f"(overlap happens when multiple samples share the same x/y)"
+    )
+
+    # Deterministic jitter so overlapping points become visible (stable across reruns)
+    def jitter_from_id(s: str):
+        h = int(hashlib.md5(s.encode("utf-8")).hexdigest()[:8], 16)
+        jx = ((h % 9) - 4) * 0.9      # minutes jitter
+        jy = (((h // 9) % 9) - 4) * 0.01  # compliance jitter
+        return jx, jy
+
+    jx_list, jy_list = [], []
+    for sid in base["sample_id"].astype(str).tolist():
+        jx, jy = jitter_from_id(sid)
+        jx_list.append(jx)
+        jy_list.append(jy)
+
+    base["x_j"] = base["comfort_violation_minutes"] + pd.Series(jx_list)
+    base["y_j"] = (base["dr_compliance_score"] + pd.Series(jy_list)).clip(0, 1)
+
+    # Scatter + labels (so it looks “not empty” even with few points)
+    pts = alt.Chart(base).mark_circle(size=140, opacity=0.85).encode(
+        x=alt.X("x_j:Q", title="Comfort violation (min)"),
+        y=alt.Y("y_j:Q", title="DR compliance", scale=alt.Scale(domain=[0, 1])),
         color=alt.Color("mode:N", title="Mode"),
         shape=alt.Shape("parser_mode_requested:N", title="Parser"),
-        tooltip=["sample_id", "parser_mode_requested", "mode",
-                 "comfort_violation_minutes", "dr_compliance_score", "hvac_on_hours", "parser_fallback"],
-    ).properties(height=360).interactive()
+        tooltip=[
+            "sample_id", "parser_mode_requested", "mode",
+            "comfort_violation_minutes", "dr_compliance_score", "hvac_on_hours"
+        ],
+    )
 
-    st.altair_chart(sc, use_container_width=True)
+    labels = alt.Chart(base).mark_text(
+        align="left", dx=6, dy=-6, fontSize=11
+    ).encode(
+        x="x_j:Q",
+        y="y_j:Q",
+        text="sample_id:N"
+    )
 
+    st.altair_chart((pts + labels).properties(height=380).interactive(), use_container_width=True)
+
+    # Optional: show the point table used for the plot
+    with st.expander("Show tradeoff points table"):
+        st.dataframe(
+            base[["sample_id", "mode", "parser_mode_requested",
+                  "comfort_violation_minutes", "dr_compliance_score", "hvac_on_hours"]],
+            use_container_width=True
+        )
 
 # -----------------------------
 # Pages
