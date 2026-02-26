@@ -1,0 +1,5 @@
+{"sample_id": "S1", "command": "I have guests coming over tonight, keep the house warm but don't run up the bill.", "gold": {"min_temp_c": 21.0, "expect_guest_event": true, "clarification_needed": true}}
+{"sample_id": "S2", "command": "No one is home this evening, save energy and help with demand response.", "gold": {"min_temp_c": 19.0, "expect_guest_event": false, "clarification_needed": false}}
+{"sample_id": "S3", "command": "Keep it cozy tonight, but electricity is expensive so be careful.", "gold": {"min_temp_c": 21.0, "expect_guest_event": false, "clarification_needed": false}}
+{"sample_id": "S4", "command": "Charge the car tonight and keep the house warm for guests.", "gold": {"min_temp_c": 21.0, "expect_guest_event": true, "clarification_needed": false}}
+{"sample_id": "S5", "command": "Try to save money later, we can tolerate a little cooler temperature.", "gold": {"min_temp_c": 20.0, "expect_guest_event": false, "clarification_needed": true}}

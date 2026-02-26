@@ -1,0 +1,15 @@
+{
+  "results_csv": "data/outputs/streamlit_comparison_results_summary_20260225-123933.csv",
+  "summary_csv": "data/outputs/streamlit_comparison_results_summary_20260225-123933.csv",
+  "generated_pngs": [
+    "fig_clarification_metrics.png",
+    "fig_guest_avg_comfort_violation.png",
+    "fig_guest_avg_dr_compliance.png",
+    "fig_guest_window_min_temp_avg.png",
+    "fig_summary_avg_comfort_violation.png",
+    "fig_summary_avg_dr_compliance.png",
+    "fig_summary_avg_hvac_on_hours.png",
+    "fig_summary_feasibility.png",
+    "fig_summary_parser_fallback_rate.png"
+  ]
+}
