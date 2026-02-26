@@ -14,13 +14,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from comparison_runner import load_jsonl, run_one_config, build_summary
-from core import optimize_schedule, map_fuzzy_preferences
-from llm_parser import parse_command_by_mode
-from clarification import should_clarify
 
 
 # -----------------------------
-# Styling
+# Page setup + styling
 # -----------------------------
 st.set_page_config(page_title="NL-HEMS-DR Dashboard", page_icon="⚡", layout="wide")
 st.markdown("""
@@ -34,7 +31,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("⚡ NL-HEMS-DR Benchmark Dashboard")
-st.caption("Natural-language → fuzzy preferences → optimized DR-aware schedule → benchmark metrics & figures")
+st.caption("Natural-language → fuzzy preferences → optimized schedule → metrics → exports")
 
 
 # -----------------------------
@@ -52,7 +49,7 @@ def apply_secrets_to_env():
         except Exception:
             pass
 
-    # section-based secrets fallback
+    # section-based fallback
     try:
         for section_name in st.secrets.keys():
             section = st.secrets[section_name]
@@ -68,31 +65,27 @@ apply_secrets_to_env()
 
 
 # -----------------------------
-# Output helpers (Fix 1 + Fix 2)
+# Output saving (Fix 1) + downloads (Fix 2)
 # -----------------------------
-def get_output_dir() -> Path:
-    """
-    Prefer writing inside the app folder, but fallback to /tmp if permissions are restricted.
-    """
-    primary = ROOT / "data" / "outputs"
-    try:
-        primary.mkdir(parents=True, exist_ok=True)
-        testfile = primary / ".write_test"
-        testfile.write_text("ok", encoding="utf-8")
-        testfile.unlink(missing_ok=True)
-        return primary
-    except Exception:
-        fallback = Path("/tmp") / "nl-hems-outputs"
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+OUTPUT_DIR_CANDIDATES = [
+    ROOT / "data" / "outputs",             # may be read-only on Community Cloud
+    Path("/tmp") / "nl-hems-outputs",      # usually writable
+]
 
+def _first_writable_dir() -> Path:
+    for d in OUTPUT_DIR_CANDIDATES:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            test = d / ".write_test"
+            test.write_text("ok", encoding="utf-8")
+            test.unlink(missing_ok=True)
+            return d
+        except Exception:
+            continue
+    raise RuntimeError("No writable output directory found (tried repo data/outputs and /tmp).")
 
-def save_outputs(results_df: pd.DataFrame, summary_df: pd.DataFrame | None, prefix: str):
-    """
-    Always save output artifacts after a run.
-    Returns paths for display in the app.
-    """
-    out_dir = get_output_dir()
+def save_outputs(results_df: pd.DataFrame, summary_df: pd.DataFrame, prefix: str):
+    out_dir = _first_writable_dir()
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     results_csv = out_dir / f"{prefix}_{ts}.csv"
@@ -107,22 +100,17 @@ def save_outputs(results_df: pd.DataFrame, summary_df: pd.DataFrame | None, pref
         summary_df.to_csv(summary_csv, index=False)
         summary_path = summary_csv
 
-    return results_csv, summary_path, results_json
+    return out_dir, results_csv, summary_path, results_json
 
-
-def download_buttons(results_df: pd.DataFrame, summary_df: pd.DataFrame | None, prefix: str):
-    """
-    Fix 2: always allow downloading results (reliable even if server disk resets).
-    """
+def download_buttons(results_df: pd.DataFrame, summary_df: pd.DataFrame, prefix: str):
     c1, c2, c3 = st.columns(3)
-
     with c1:
         st.download_button(
             "⬇️ Results CSV",
             data=results_df.to_csv(index=False).encode("utf-8"),
             file_name=f"{prefix}_results.csv",
             mime="text/csv",
-            use_container_width=True
+            use_container_width=True,
         )
     with c2:
         st.download_button(
@@ -130,7 +118,7 @@ def download_buttons(results_df: pd.DataFrame, summary_df: pd.DataFrame | None, 
             data=json.dumps(results_df.to_dict("records"), indent=2).encode("utf-8"),
             file_name=f"{prefix}_results.json",
             mime="application/json",
-            use_container_width=True
+            use_container_width=True,
         )
     with c3:
         if summary_df is not None and not summary_df.empty:
@@ -139,7 +127,7 @@ def download_buttons(results_df: pd.DataFrame, summary_df: pd.DataFrame | None, 
                 data=summary_df.to_csv(index=False).encode("utf-8"),
                 file_name=f"{prefix}_summary.csv",
                 mime="text/csv",
-                use_container_width=True
+                use_container_width=True,
             )
         else:
             st.download_button(
@@ -148,8 +136,24 @@ def download_buttons(results_df: pd.DataFrame, summary_df: pd.DataFrame | None, 
                 file_name=f"{prefix}_summary.csv",
                 mime="text/csv",
                 disabled=True,
-                use_container_width=True
+                use_container_width=True,
             )
+
+def list_output_files():
+    rows = []
+    for d in OUTPUT_DIR_CANDIDATES:
+        if d.exists():
+            for f in sorted(d.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
+                if f.name == ".write_test":
+                    continue
+                rows.append({
+                    "dir": str(d),
+                    "name": f.name,
+                    "size": f.stat().st_size,
+                    "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
+                    "path": str(f),
+                })
+    return pd.DataFrame(rows)
 
 
 # -----------------------------
@@ -167,7 +171,6 @@ with st.sidebar:
         index=PAGES.index(st.session_state.page_stack[-1]),
         label_visibility="collapsed"
     )
-
     if current_page != st.session_state.page_stack[-1]:
         st.session_state.page_stack.append(current_page)
 
@@ -180,7 +183,7 @@ page = st.session_state.page_stack[-1]
 
 
 # -----------------------------
-# Sidebar controls (inputs + overrides)
+# Sidebar controls + Run buttons
 # -----------------------------
 with st.sidebar:
     st.markdown("---")
@@ -188,77 +191,12 @@ with st.sidebar:
 
     parser_mode = st.selectbox("Parser mode", ["stub", "llm"], index=0)
     comfort_mode = st.selectbox("Comfort mode", ["hard_guest_comfort", "soft_comfort"], index=0)
-    enforce_guest_hard_comfort = comfort_mode == "hard_guest_comfort"
+    enforce_hard = (comfort_mode == "hard_guest_comfort")
 
     dataset_path = st.text_input(
         "Dataset (JSONL)",
         value=str(ROOT / "data" / "samples" / "benchmark_samples.jsonl")
     )
-
-    st.markdown("---")
-    st.subheader("Context Controls")
-    use_sample_context = st.checkbox("Use per-sample context (if present)", value=True)
-    enable_overrides = st.checkbox("Override context for runs", value=True)
-
-    # Horizon
-    h_start = st.slider("Horizon start hour", 0, 23, 16)
-    h_end = st.slider("Horizon end hour", 1, 24, 24)
-
-    # Thermal
-    initial_temp_c = st.slider("Initial temp (°C)", 15.0, 26.0, 20.0, 0.1)
-    loss_c = st.slider("Heat loss (°C/hour)", 0.0, 1.5, 0.4, 0.05)
-    heat_c = st.slider("Heating gain (°C/hour when ON)", 0.0, 2.0, 0.8, 0.05)
-
-    # DR hours
-    hours_list = list(range(h_start, h_end))
-    dr_hours = st.multiselect("DR event hours", options=hours_list, default=[h for h in [18, 19] if h in hours_list])
-
-    # Price table
-    st.caption("Price levels (edit to see different schedules)")
-    default_price = []
-    for h in hours_list:
-        val = 2
-        if h == 17: val = 3
-        if h in (18, 20): val = 8
-        if h == 19: val = 9
-        if h == 21: val = 5
-        if h == 22: val = 3
-        if h == 23: val = 2
-        default_price.append(val)
-
-    if "price_df" not in st.session_state or st.session_state.get("price_df_hours") != hours_list:
-        st.session_state.price_df = pd.DataFrame({"hour": hours_list, "price": default_price})
-        st.session_state.price_df_hours = hours_list
-
-    price_df = st.data_editor(
-        st.session_state.price_df,
-        use_container_width=True,
-        num_rows="fixed",
-        key="price_editor"
-    )
-    st.session_state.price_df = price_df
-    price_override = {int(r["hour"]): int(r["price"]) for _, r in price_df.iterrows()}
-
-    # Weight multipliers
-    st.caption("Penalty weight multipliers")
-    comfort_scale = st.slider("Comfort weight ×", 0.2, 3.0, 1.0, 0.1)
-    cost_scale = st.slider("Cost weight ×", 0.2, 3.0, 1.0, 0.1)
-    dr_scale = st.slider("DR weight ×", 0.2, 3.0, 1.0, 0.1)
-
-    override_context = None
-    if enable_overrides:
-        override_context = {
-            "horizon_start_hour": h_start,
-            "horizon_end_hour": h_end,
-            "initial_temp_c": initial_temp_c,
-            "loss_c_per_hour": loss_c,
-            "heat_c_per_hour": heat_c,
-            "dr_event_hours": dr_hours,
-            "price": price_override,
-            "comfort_weight_scale": comfort_scale,
-            "cost_weight_scale": cost_scale,
-            "dr_weight_scale": dr_scale,
-        }
 
     st.markdown("---")
     st.subheader("LLM Status")
@@ -272,51 +210,88 @@ with st.sidebar:
 
 
 # -----------------------------
-# Run helpers
+# Session state
 # -----------------------------
-def run_benchmark(parser_mode: str, enforce_hard: bool):
+if "results_df" not in st.session_state:
+    st.session_state.results_df = pd.DataFrame()
+if "summary_df" not in st.session_state:
+    st.session_state.summary_df = pd.DataFrame()
+if "saved_info" not in st.session_state:
+    st.session_state.saved_info = None
+
+
+# -----------------------------
+# Run actions (IMPORTANT: now runs from ANY page)
+# -----------------------------
+def run_selected_benchmark():
     samples = load_jsonl(Path(dataset_path))
     cmode = {"name": "hard_guest_comfort" if enforce_hard else "soft_comfort",
              "enforce_guest_hard_comfort": enforce_hard}
-    rows = run_one_config(
-        samples,
-        parser_mode=parser_mode,
-        comfort_mode=cmode,
-        override_context=override_context,
-        use_sample_context=use_sample_context,
-    )
+    rows = run_one_config(samples, parser_mode=parser_mode, comfort_mode=cmode)
     df = pd.DataFrame(rows)
     summary = build_summary(df)
-    return df, summary
 
+    st.session_state.results_df = df
+    st.session_state.summary_df = summary
 
-def run_comparison_all():
+    out_dir, r_csv, s_csv, r_json = save_outputs(df, summary, prefix=f"benchmark_{parser_mode}_{cmode['name']}")
+    st.session_state.saved_info = {
+        "out_dir": str(out_dir),
+        "results_csv": str(r_csv),
+        "summary_csv": str(s_csv) if s_csv else None,
+        "results_json": str(r_json),
+    }
+
+def run_full_comparison():
     samples = load_jsonl(Path(dataset_path))
     configs = [("stub", False), ("stub", True), ("llm", False), ("llm", True)]
     all_rows = []
-    prog = st.progress(0.0)
-    for i, (pmode, hard) in enumerate(configs, start=1):
+    for pmode, hard in configs:
         cmode = {"name": "hard_guest_comfort" if hard else "soft_comfort",
                  "enforce_guest_hard_comfort": hard}
-        all_rows.extend(
-            run_one_config(
-                samples,
-                parser_mode=pmode,
-                comfort_mode=cmode,
-                override_context=override_context,
-                use_sample_context=use_sample_context,
-            )
-        )
-        prog.progress(i / len(configs))
+        all_rows.extend(run_one_config(samples, parser_mode=pmode, comfort_mode=cmode))
+
     df = pd.DataFrame(all_rows)
     summary = build_summary(df)
-    return df, summary
+
+    st.session_state.results_df = df
+    st.session_state.summary_df = summary
+
+    out_dir, r_csv, s_csv, r_json = save_outputs(df, summary, prefix="comparison_all")
+    st.session_state.saved_info = {
+        "out_dir": str(out_dir),
+        "results_csv": str(r_csv),
+        "summary_csv": str(s_csv) if s_csv else None,
+        "results_json": str(r_json),
+    }
+
+# Execute runs even if user is on Files/Playground page
+if run_selected:
+    try:
+        run_selected_benchmark()
+        st.success("Benchmark run complete. Outputs saved.")
+        # Auto-jump user back to Dashboard so they see results
+        st.session_state.page_stack = ["Dashboard"]
+        st.rerun()
+    except Exception as e:
+        st.exception(e)
+
+if run_full:
+    try:
+        run_full_comparison()
+        st.success("Comparison run complete. Outputs saved.")
+        st.session_state.page_stack = ["Dashboard"]
+        st.rerun()
+    except Exception as e:
+        st.exception(e)
 
 
+# -----------------------------
+# Dashboard page
+# -----------------------------
 def kpi_cards(df: pd.DataFrame):
     ok = df[df["status"] == "ok"] if "status" in df.columns else pd.DataFrame()
     feasibility = len(ok) / len(df) if len(df) else 0.0
-
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(f"<div class='card'><div class='small'>Rows</div><div class='big'>{len(df)}</div></div>", unsafe_allow_html=True)
     c2.markdown(f"<div class='card'><div class='small'>Feasibility</div><div class='big'>{feasibility:.2f}</div></div>", unsafe_allow_html=True)
@@ -329,23 +304,20 @@ def kpi_cards(df: pd.DataFrame):
     else:
         c4.markdown("<div class='card'><div class='small'>Avg DR compliance</div><div class='big'>n/a</div></div>", unsafe_allow_html=True)
 
-
-def charts(df: pd.DataFrame, summary: pd.DataFrame):
+def charts(df: pd.DataFrame):
     ok = df[df["status"] == "ok"].copy() if "status" in df.columns else df.copy()
     if ok.empty:
         st.warning("No successful rows to chart.")
         return
 
-    st.markdown("<div class='section'>Per-sample charts</div>", unsafe_allow_html=True)
     c1, c2 = st.columns(2)
-
     with c1:
         if "comfort_violation_minutes" in ok.columns:
             ch = alt.Chart(ok).mark_bar().encode(
                 x=alt.X("sample_id:N", title="Sample"),
                 y=alt.Y("comfort_violation_minutes:Q", title="Comfort violation (min)"),
                 color=alt.Color("mode:N", title="Mode"),
-                tooltip=["sample_id", "parser_mode_requested", "mode", "comfort_violation_minutes", "dr_compliance_score", "hvac_on_hours"]
+                tooltip=["sample_id", "parser_mode_requested", "mode", "comfort_violation_minutes", "dr_compliance_score"]
             ).properties(height=320)
             st.altair_chart(ch, use_container_width=True)
 
@@ -359,99 +331,33 @@ def charts(df: pd.DataFrame, summary: pd.DataFrame):
             ).properties(height=320)
             st.altair_chart(ch, use_container_width=True)
 
-    st.markdown("<div class='section'>Tradeoff view</div>", unsafe_allow_html=True)
     if {"comfort_violation_minutes", "dr_compliance_score"}.issubset(ok.columns):
+        st.markdown("<div class='section'>Tradeoff</div>", unsafe_allow_html=True)
         sc = alt.Chart(ok).mark_circle(size=120).encode(
             x=alt.X("comfort_violation_minutes:Q", title="Comfort violation (min)"),
             y=alt.Y("dr_compliance_score:Q", title="DR compliance", scale=alt.Scale(domain=[0, 1])),
             color=alt.Color("mode:N", title="Mode"),
             shape=alt.Shape("parser_mode_requested:N", title="Parser"),
-            tooltip=["sample_id", "parser_mode_requested", "mode", "comfort_violation_minutes", "dr_compliance_score", "hvac_on_hours", "parser_fallback"]
+            tooltip=["sample_id", "parser_mode_requested", "mode", "comfort_violation_minutes", "dr_compliance_score", "parser_fallback"]
         ).properties(height=360).interactive()
         st.altair_chart(sc, use_container_width=True)
 
-    if summary is not None and not summary.empty:
-        st.markdown("<div class='section'>Summary comparison</div>", unsafe_allow_html=True)
-        summary = summary.copy()
-        summary["config"] = summary["parser_mode_requested"].astype(str) + " | " + summary["mode"].astype(str)
-
-        mcols = [c for c in ["feasibility_rate", "avg_comfort_violation_minutes", "avg_dr_compliance_score", "avg_hvac_on_hours"] if c in summary.columns]
-        if mcols:
-            mdf = summary[["config"] + mcols].melt("config", var_name="metric", value_name="value")
-            bc = alt.Chart(mdf).mark_bar().encode(
-                x=alt.X("config:N", title="Configuration"),
-                y=alt.Y("value:Q", title="Value"),
-                color=alt.Color("metric:N", title="Metric"),
-                column=alt.Column("metric:N", title=None),
-                tooltip=["config", "metric", "value"]
-            ).properties(height=260)
-            st.altair_chart(bc, use_container_width=True)
-
-
-# -----------------------------
-# Session state for results + saved file paths
-# -----------------------------
-if "results_df" not in st.session_state:
-    st.session_state.results_df = pd.DataFrame()
-if "summary_df" not in st.session_state:
-    st.session_state.summary_df = pd.DataFrame()
-if "saved_paths" not in st.session_state:
-    st.session_state.saved_paths = None
-
-
-# -----------------------------
-# Pages
-# -----------------------------
 if page == "Dashboard":
-    st.markdown("<div class='section'>Run benchmark</div>", unsafe_allow_html=True)
-
-    if run_selected:
-        try:
-            df, summary = run_benchmark(parser_mode, enforce_guest_hard_comfort)
-            st.session_state.results_df = df
-            st.session_state.summary_df = summary
-
-            # Fix 1: ALWAYS write outputs after run
-            prefix = f"benchmark_{parser_mode}_{'hard' if enforce_guest_hard_comfort else 'soft'}"
-            r_csv, s_csv, r_json = save_outputs(df, summary, prefix=prefix)
-            st.session_state.saved_paths = (r_csv, s_csv, r_json)
-
-            st.success("Run complete. Outputs saved.")
-        except Exception as e:
-            st.exception(e)
-
-    if run_full:
-        try:
-            df, summary = run_comparison_all()
-            st.session_state.results_df = df
-            st.session_state.summary_df = summary
-
-            # Fix 1: ALWAYS write outputs after run
-            prefix = "comparison_all"
-            r_csv, s_csv, r_json = save_outputs(df, summary, prefix=prefix)
-            st.session_state.saved_paths = (r_csv, s_csv, r_json)
-
-            st.success("Comparison complete. Outputs saved.")
-        except Exception as e:
-            st.exception(e)
-
     df = st.session_state.results_df
     summary = st.session_state.summary_df
 
     if df is None or df.empty:
-        st.info("Run a benchmark to see KPI cards, graphs, tables, and downloadable outputs.")
+        st.info("Click **Run Selected Benchmark** (left sidebar) to generate outputs.")
     else:
-        # Fix 2: Downloads are always available
-        st.markdown("<div class='section'>Download outputs</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section'>Downloads</div>", unsafe_allow_html=True)
         download_buttons(df, summary, prefix="nl_hems")
 
-        # Show saved file paths (helps confirm Fix 1)
-        if st.session_state.saved_paths:
-            r_csv, s_csv, r_json = st.session_state.saved_paths
-            st.caption(f"Saved files on server: {r_csv.name}, {r_json.name}" + (f", {s_csv.name}" if s_csv else ""))
+        if st.session_state.saved_info:
+            st.caption(f"Saved on server in: {st.session_state.saved_info['out_dir']}")
+            st.caption(f"CSV: {st.session_state.saved_info['results_csv']}")
 
         kpi_cards(df)
-        charts(df, summary)
+        charts(df)
 
         st.markdown("<div class='section'>Tables</div>", unsafe_allow_html=True)
         if summary is not None and not summary.empty:
@@ -460,58 +366,39 @@ if page == "Dashboard":
         st.write("Detailed results")
         st.dataframe(df, use_container_width=True)
 
-elif page == "Playground":
-    st.markdown("<div class='section'>Single-command playground</div>", unsafe_allow_html=True)
+elif page == "Files":
+    st.markdown("<div class='section'>Outputs</div>", unsafe_allow_html=True)
+    st.write("Output directories checked:")
+    for d in OUTPUT_DIR_CANDIDATES:
+        st.write("-", str(d), "(exists)" if d.exists() else "(missing)")
 
-    command = st.text_area(
-        "Command",
-        value="I have guests coming over tonight, keep the house warm but don't run up the bill.",
-        height=120
-    )
-
-    colA, colB, colC = st.columns(3)
-    play_parser = colA.selectbox("Parser", ["stub", "llm"], index=0)
-    play_hard = colB.checkbox("Hard guest comfort", value=True)
-    run_one = colC.button("Run", use_container_width=True)
-
-    if run_one:
-        try:
-            intent, meta = parse_command_by_mode(command, play_parser)
-            clar, q = should_clarify(command, intent)
-            intent.clarification_needed = clar
-
-            mapped = map_fuzzy_preferences(intent, enforce_guest_hard_comfort=play_hard)
-            sched = optimize_schedule(mapped, context=override_context if enable_overrides else {})
-
-            st.write({"parser_used": meta.get("parser_used"), "fallback": meta.get("fallback"), "error": meta.get("error")})
-            st.json(intent.model_dump())
-            st.write({"clarification_pred": clar, "clarification_question": q})
-            st.json(mapped)
-            st.json(sched)
-
-            if sched.get("status") == "ok":
-                sdf = pd.DataFrame(sched["schedule"])
-                tchart = alt.Chart(sdf).mark_line(point=True).encode(
-                    x=alt.X("hour:Q", title="Hour"),
-                    y=alt.Y("temp_c:Q", title="Temp (°C)"),
-                    tooltip=["hour", "temp_c", "hvac_on", "dr_event", "guest_window"]
-                ).properties(height=260)
-                hchart = alt.Chart(sdf).mark_bar().encode(
-                    x=alt.X("hour:Q", title="Hour"),
-                    y=alt.Y("hvac_on:Q", title="HVAC On (0/1)", scale=alt.Scale(domain=[0, 1])),
-                    tooltip=["hour", "hvac_on", "price_level", "dr_event", "guest_window"]
-                ).properties(height=180)
-                st.altair_chart(tchart, use_container_width=True)
-                st.altair_chart(hchart, use_container_width=True)
-                st.dataframe(sdf, use_container_width=True)
-
-        except Exception as e:
-            st.exception(e)
+    files_df = list_output_files()
+    if files_df.empty:
+        st.warning("No output files yet. Run a benchmark from the sidebar (it works from any page now).")
+        if st.button("Create test output file", use_container_width=True):
+            try:
+                d = _first_writable_dir()
+                tf = d / f"test_{datetime.now().strftime('%H%M%S')}.txt"
+                tf.write_text("test ok", encoding="utf-8")
+                st.success(f"Created {tf}")
+                st.rerun()
+            except Exception as e:
+                st.exception(e)
+    else:
+        st.dataframe(files_df, use_container_width=True)
+        pick = st.selectbox("Preview", files_df["path"].tolist())
+        fp = Path(pick)
+        if fp.suffix.lower() == ".csv":
+            st.dataframe(pd.read_csv(fp).head(300), use_container_width=True)
+        elif fp.suffix.lower() == ".json":
+            content = json.loads(fp.read_text(encoding="utf-8"))
+            st.json(content[:10] if isinstance(content, list) else content)
+        else:
+            st.write(fp.read_text(encoding="utf-8", errors="replace")[:3000])
 
 elif page == "Dataset Editor":
     st.markdown("<div class='section'>Dataset editor (JSONL)</div>", unsafe_allow_html=True)
     p = Path(dataset_path)
-
     if not p.exists():
         st.error(f"File not found: {p}")
     else:
@@ -540,36 +427,5 @@ elif page == "Dataset Editor":
             else:
                 st.success(f"All good. Parsed {ok} JSON lines.")
 
-        st.info("Tip: Add per-sample context like "
-                "{\"context\":{\"initial_temp_c\":21,\"dr_event_hours\":[19,20],\"price\":{\"16\":2,...}}}")
-
-elif page == "Files":
-    st.markdown("<div class='section'>Outputs</div>", unsafe_allow_html=True)
-
-    out_dir = get_output_dir()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    files = sorted(out_dir.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True)
-
-    if not files:
-        st.info("No output files yet. Run a benchmark from the Dashboard first.")
-    else:
-        df_files = pd.DataFrame([{
-            "name": f.name,
-            "size": f.stat().st_size,
-            "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
-            "path": str(f)
-        } for f in files])
-
-        st.dataframe(df_files, use_container_width=True)
-
-        pick = st.selectbox("Preview", df_files["name"].tolist())
-        fp = out_dir / pick
-
-        if fp.suffix.lower() == ".csv":
-            st.dataframe(pd.read_csv(fp).head(300), use_container_width=True)
-        elif fp.suffix.lower() == ".json":
-            content = json.loads(fp.read_text(encoding="utf-8"))
-            st.json(content[:10] if isinstance(content, list) else content)
-        else:
-            st.write(fp.read_text(encoding="utf-8", errors="replace")[:3000])
+elif page == "Playground":
+    st.info("Playground kept minimal in this version. Use Dashboard + Files for outputs.")
