@@ -556,6 +556,7 @@ elif page == "Files":
         st.write("-", str(d), "(exists)" if d.exists() else "(missing)")
 
     files_df = list_output_files()
+
     if files_df.empty:
         st.warning("No output files yet. Run a benchmark from the sidebar first.")
         if st.button("Create test output file", use_container_width=True):
@@ -568,8 +569,18 @@ elif page == "Files":
             except Exception as e:
                 st.exception(e)
     else:
-        st.dataframe(files_df, use_container_width=True)
-        pick = st.selectbox("Preview", files_df["path"].tolist())
+        # Optional filter so you don't delete random files by mistake
+        show_only_outputs = st.checkbox(
+            "Show only benchmark output files (csv/json/txt)", value=True
+        )
+        view_df = files_df.copy()
+        if show_only_outputs:
+            view_df = view_df[view_df["name"].str.lower().str.endswith((".csv", ".json", ".txt"))].copy()
+
+        st.dataframe(view_df, use_container_width=True)
+
+        # Preview
+        pick = st.selectbox("Preview", view_df["path"].tolist())
         fp = Path(pick)
 
         if fp.suffix.lower() == ".csv":
@@ -579,6 +590,52 @@ elif page == "Files":
             st.json(content[:10] if isinstance(content, list) else content)
         else:
             st.write(fp.read_text(encoding="utf-8", errors="replace")[:3000])
+
+        st.markdown("---")
+        st.markdown("<div class='section'>Delete outputs</div>", unsafe_allow_html=True)
+        st.caption("Deletes files from the app's container storage. (On Streamlit Cloud, files may also disappear on restart.)")
+
+        # Select specific files
+        candidates = view_df["path"].tolist()
+        selected = st.multiselect("Select files to delete", candidates, default=[])
+
+        colA, colB = st.columns(2)
+
+        with colA:
+            confirm = st.checkbox("I understand this will permanently delete selected files.", value=False)
+            if st.button("🗑️ Delete selected", use_container_width=True, disabled=(not selected or not confirm)):
+                deleted = 0
+                errors = []
+                for p in selected:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                        deleted += 1
+                    except Exception as e:
+                        errors.append((p, str(e)))
+                if deleted:
+                    st.success(f"Deleted {deleted} file(s).")
+                if errors:
+                    st.error("Some files could not be deleted:")
+                    st.write(errors[:10])
+                st.rerun()
+
+        with colB:
+            confirm_all = st.checkbox("Confirm delete ALL listed files", value=False)
+            if st.button("🔥 Delete ALL listed outputs", use_container_width=True, disabled=(not confirm_all)):
+                deleted = 0
+                errors = []
+                for p in candidates:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                        deleted += 1
+                    except Exception as e:
+                        errors.append((p, str(e)))
+                if deleted:
+                    st.success(f"Deleted {deleted} file(s).")
+                if errors:
+                    st.error("Some files could not be deleted:")
+                    st.write(errors[:10])
+                st.rerun()
 
 elif page == "Dataset Editor":
     st.markdown("<div class='section'>Dataset editor (JSONL)</div>", unsafe_allow_html=True)
