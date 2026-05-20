@@ -82,6 +82,26 @@ def _building(E_bat=10.0, P_bat=5.0):
 # =====================================================================
 def tab_overview():
     st.title("NL-HEMS v2 - Journal revision dashboard")
+
+    # ---------- LLM API status banner ----------
+    llm = LLMParser()
+    status = llm.status()
+    if status["client_ready"]:
+        st.success(f"LLM API connected: {status['backend'].upper()}. "
+                   "The 'LLM' parser will call the real model.")
+    else:
+        st.warning(
+            "No LLM API key detected in Streamlit secrets. The 'LLM' parser "
+            "transparently falls back to the in-process SimulatedLLMParser. "
+            "To enable a real LLM, add OPENAI_API_KEY or ANTHROPIC_API_KEY "
+            "under Streamlit *Settings -> Secrets*."
+        )
+    st.caption("Tip: when you run the *Single Command* tab, the parsed-intent "
+               "JSON shows the actual `parser_name` used: "
+               "`llm` = real API call succeeded, `llm-sim-fallback` = no key, "
+               "`llm` with `fallback: true` = API call failed mid-request.")
+    st.divider()
+
     st.markdown("""
 This build directly answers the reviewer feedback on the v1 manuscript.
 Each tab below corresponds to one revision point.
