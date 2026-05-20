@@ -496,13 +496,21 @@ live PVGIS fetch; otherwise the bundled cached profile is used.
     ctx = real_milan_context(horizon=horizon, weekday=weekday_idx,
                              peak_kwp=peak_kwp, try_live=try_live)
 
+    # Defensive sizing: use the smallest common length so DataFrame
+    # construction never fails on a length mismatch.
+    arrays = {
+        "T_out (C)":        np.asarray(ctx["T_out"]).ravel(),
+        "Price (EUR/kWh)":  np.asarray(ctx["price"]).ravel(),
+        "PV (kW)":          np.asarray(ctx["PV"]).ravel(),
+        "DR event":         np.asarray(ctx["d"]).ravel(),
+    }
+    H = min(int(horizon), *(len(a) for a in arrays.values()))
+    arrays = {k: v[:H] for k, v in arrays.items()}
+
     st.caption(f"Data source: {ctx['source']}")
     df = pd.DataFrame({
-        "hour":  np.arange(horizon),
-        "T_out (C)": ctx["T_out"],
-        "Price (EUR/kWh)": ctx["price"],
-        "PV (kW)": ctx["PV"],
-        "DR event": ctx["d"],
+        "hour":  np.arange(H),
+        **arrays,
     })
     c1, c2, c3 = st.columns(3)
     with c1:
