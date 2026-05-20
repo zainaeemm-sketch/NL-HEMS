@@ -1,0 +1,9 @@
+streamlit>=1.36
+numpy>=1.26
+pandas>=2.2
+matplotlib>=3.8
+plotly>=5.20
+ortools>=9.10
+scipy>=1.13
+requests>=2.31
+openai>=1.30
