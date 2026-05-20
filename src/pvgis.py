@@ -58,10 +58,14 @@ def milan_pv_profile(peak_kwp: float = 3.0,
 
 
 def try_fetch_pvgis(lat: float, lon: float, peak_kwp: float = 3.0,
+                    horizon: int = 24,
                     year: int = 2020, month: int = 5,
                     day: int = 15) -> np.ndarray | None:
     """
-    Live PVGIS fetch (hourly). Returns kW array of length 24 or None on failure.
+    Live PVGIS fetch (hourly). Returns kW array of length ``horizon``
+    or None on failure. Output is always reshaped to ``horizon`` length
+    (tiled if shorter, truncated if longer) so the caller can use it
+    interchangeably with the cached profile.
 
     Endpoint: https://re.jrc.ec.europa.eu/api/v5_2/seriescalc
     """
@@ -84,8 +88,17 @@ def try_fetch_pvgis(lat: float, lon: float, peak_kwp: float = 3.0,
         rows = [row for row in hourly if row["time"].startswith(target_day)]
         if not rows:
             return None
-        # 'P' is power in W
-        return np.array([row["P"] / 1000.0 for row in rows[:24]])
+        # 'P' is power in W; rescale to kW
+        arr = np.array([row["P"] / 1000.0 for row in rows[:24]])
+        # Guarantee exactly ``horizon`` samples by tiling / truncating
+        if len(arr) == 0:
+            return None
+        if len(arr) < horizon:
+            reps = horizon // len(arr) + 1
+            arr = np.tile(arr, reps)[:horizon]
+        else:
+            arr = arr[:horizon]
+        return arr
     except Exception:
         return None
 
@@ -159,15 +172,36 @@ def real_milan_context(horizon: int = 24,
     """
     pv = None
     if try_live:
-        pv = try_fetch_pvgis(45.464, 9.190, peak_kwp=peak_kwp)
+        pv = try_fetch_pvgis(45.464, 9.190, peak_kwp=peak_kwp,
+                             horizon=horizon)
     if pv is None:
         pv = milan_pv_profile(peak_kwp=peak_kwp, horizon=horizon)
 
+    T_out = outdoor_temperature_milan_may(horizon)
+    price = arera_price_profile(horizon, weekday=weekday)
+    d     = dr_event_hours(horizon, hours=(19, 20))
+
+    # Defensive: guarantee every array has exactly ``horizon`` samples.
+    def _resize(a, n):
+        a = np.asarray(a).ravel()
+        if len(a) == n:
+            return a
+        if len(a) > n:
+            return a[:n]
+        # too short -> pad with last value (or 0 if empty)
+        pad_value = a[-1] if len(a) > 0 else 0.0
+        return np.concatenate([a, np.full(n - len(a), pad_value)])
+
+    T_out = _resize(T_out, horizon)
+    price = _resize(price, horizon)
+    pv    = _resize(pv,    horizon)
+    d     = _resize(d,     horizon).astype(int)
+
     return {
-        "T_out":  outdoor_temperature_milan_may(horizon),
-        "price":  arera_price_profile(horizon, weekday=weekday),
+        "T_out":  T_out,
+        "price":  price,
         "PV":     pv,
-        "d":      dr_event_hours(horizon, hours=(19, 20)),
+        "d":      d,
         "horizon": horizon,
         "source": "PVGIS (cached) + ARERA F1/F2/F3 + Milan May climatology",
     }
