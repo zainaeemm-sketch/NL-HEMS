@@ -247,20 +247,35 @@ class LLMParser:
         prompt = self._build_prompt(utterance)
         try:
             if self._backend == "openai":
-                # Some OpenAI-compatible proxies do not implement
-                # response_format={"type": "json_object"}; we rely on
-                # the prompt instruction and strip code fences if needed.
+                # Reasoning-style models (gpt-5-*, o1, o3, ...) consume
+                # tokens internally before any visible output; we therefore
+                # use a generous budget. We also do not pass `temperature`
+                # because newer reasoning models reject it.
                 resp = self._client.chat.completions.create(
                     model=self._model,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=400,
-                    temperature=0.0,
+                    max_tokens=1500,
                 )
                 text = resp.choices[0].message.content or ""
+
+                # Empty body is the failure mode we hit with reasoning
+                # models when the token budget is exhausted before any
+                # output is emitted. Surface the raw response so the
+                # diagnostic banner can show what the proxy returned.
+                if not text.strip():
+                    try:
+                        snippet = resp.model_dump_json()[:400]
+                    except Exception:
+                        snippet = str(resp)[:400]
+                    raise ValueError(
+                        f"empty content; finish_reason="
+                        f"{getattr(resp.choices[0], 'finish_reason', '?')}; "
+                        f"raw={snippet}"
+                    )
             else:
                 resp = self._client.messages.create(
                     model=self._model,
-                    max_tokens=400,
+                    max_tokens=1500,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 text = resp.content[0].text
@@ -287,17 +302,21 @@ class LLMParser:
             return out
 
     def _build_prompt(self, utterance: str) -> str:
-        return f"""You are an intent parser for a home energy system.
-Return a single JSON object with the fields:
-  guest_flag (0/1), window_start (int 0-23 or null), window_end (int 0-23 or null),
-  comfort_label (cool/neutral/warm/hot), comfort_priority (0-1),
-  comfort_intensity (0-1, 1 = insistent, 0.3 = hedged),
-  cost_label (low/medium/high), budget (number or null),
-  dr_label (low/medium/high), dr_priority (0-1),
-  medical_context (0/1), clarification_needed (0/1).
+        return f"""You are a strict JSON intent parser for a home energy
+management system. Reply with exactly one JSON object and nothing else
+(no prose, no markdown, no code fences, no commentary before or after).
+
+Schema fields (all optional, use null for unknown):
+  guest_flag (0|1), window_start (int 0-23 or null),
+  window_end (int 0-23 or null),
+  comfort_label ("cool"|"neutral"|"warm"|"hot"),
+  comfort_priority (0..1), comfort_intensity (0..1; 1=insistent, 0.3=hedged),
+  cost_label ("low"|"medium"|"high"), budget (number or null),
+  dr_label ("low"|"medium"|"high"), dr_priority (0..1),
+  medical_context (0|1), clarification_needed (0|1).
 
 Utterance: "{utterance}"
-JSON only, no commentary."""
+JSON:"""
 
 
 # ---------------------------------------------------------------------
