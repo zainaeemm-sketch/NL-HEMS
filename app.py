@@ -87,15 +87,50 @@ def tab_overview():
     llm = LLMParser()
     status = llm.status()
     if status["client_ready"]:
-        st.success(f"LLM API connected: {status['backend'].upper()}. "
-                   "The 'LLM' parser will call the real model.")
+        st.success(
+            f"LLM API connected. "
+            f"Backend: **{status['backend']}**  "
+            f"Model: **{status['model']}**  "
+            + (f"Base URL: `{status['base_url']}`"
+               if status['base_url'] else "Base URL: default")
+        )
+        # Live ping so the user knows the API actually responds
+        with st.expander("Test the API now"):
+            if st.button("Send a test prompt"):
+                test = llm.parse("Guests coming tonight, keep it warm but watch the bill.")
+                t_status = llm.status()
+                if t_status["last_error"]:
+                    st.error(f"API call failed: {t_status['last_error']}")
+                    st.info("The simulated fallback was used instead. "
+                            "Common causes: invalid model name for this "
+                            "proxy, expired key, network block, or the "
+                            "proxy not supporting the chat-completions "
+                            "schema. Verify the model name in your "
+                            "VectorEngine dashboard matches LLM_MODEL.")
+                else:
+                    st.success(f"API responded. parser_name = `{test.parser_name}`, "
+                               f"fallback = `{test.fallback}`")
+                    st.json(test.to_dict())
     else:
         st.warning(
-            "No LLM API key detected in Streamlit secrets. The 'LLM' parser "
-            "transparently falls back to the in-process SimulatedLLMParser. "
-            "To enable a real LLM, add OPENAI_API_KEY or ANTHROPIC_API_KEY "
-            "under Streamlit *Settings -> Secrets*."
+            "No LLM API key detected in Streamlit secrets, or the client "
+            "failed to initialise. The 'LLM' parser transparently falls "
+            "back to the in-process SimulatedLLMParser."
         )
+        if status["last_error"]:
+            st.error(f"Initialisation error: {status['last_error']}")
+        st.markdown("""
+**To enable a real LLM**, set the following in Streamlit
+*Settings -> Secrets* (TOML format):
+
+```toml
+OPENAI_API_KEY  = "sk-..."
+LLM_MODEL       = "gpt-4o-mini"                  # or your proxy's model name
+OPENAI_BASE_URL = "https://api.vectorengine.ai/v1"  # only for non-OpenAI proxies
+```
+
+Restart the app from *Manage app -> Reboot* after changing secrets.
+""")
     st.caption("Tip: when you run the *Single Command* tab, the parsed-intent "
                "JSON shows the actual `parser_name` used: "
                "`llm` = real API call succeeded, `llm-sim-fallback` = no key, "
