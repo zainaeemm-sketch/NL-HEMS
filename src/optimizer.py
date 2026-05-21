@@ -65,21 +65,24 @@ def solve_stochastic(theta: dict,
                      guest_window: tuple[int, int] | None = None,
                      building: dict | None = None,
                      time_limit_s: float = 30.0,
-                     verbose: bool = False) -> Dict[str, Any]:
+                     verbose: bool = False,
+                     fix_y: np.ndarray | None = None,
+                     fix_ubat: np.ndarray | None = None) -> Dict[str, Any]:
     """
     Solve the two-stage SAA problem.
 
     Parameters
     ----------
     theta : dict
-        Output of fuzzy / direct mapping. Must contain at least:
-        T_target, T_min, lambda_comf, lambda_min, lambda_cost,
-        lambda_dr, lambda_sw, guest_hard.
-    scenarios : list of dicts with keys T_out, price, PV, d, prob.
+        Output of fuzzy / direct mapping.
+    scenarios : list of dicts with keys T_out, price, PV, load, d, prob.
     alpha : chance-constraint level. alpha == 0 -> hard constraint on
             indoor temperature inside guest_window.
     guest_window : (start, end) hour range on which the chance constraint
             is active. If None, the constraint is inactive.
+    fix_y, fix_ubat : optional first-stage decision sequences to fix
+            before solving the recourse. Used to evaluate a previously
+            obtained schedule on a new scenario set (e.g. for VSS).
     """
     p = _merge_params(theta, building)
     H = int(len(scenarios[0]["T_out"]))
@@ -98,6 +101,17 @@ def solve_stochastic(theta: dict,
     for t in range(1, H):
         model.Add(sw[t] >= y[t]   - y[t-1])
         model.Add(sw[t] >= y[t-1] - y[t])
+
+    # If a previously obtained first-stage schedule is supplied, fix
+    # y(t) and u_bat(t) so the optimizer only computes the recourse.
+    if fix_y is not None:
+        fix_y_arr = np.asarray(fix_y, dtype=int).ravel()
+        for t in range(min(H, len(fix_y_arr))):
+            model.Add(y[t] == int(fix_y_arr[t]))
+    if fix_ubat is not None:
+        fix_u_arr = np.asarray(fix_ubat, dtype=int).ravel()
+        for t in range(min(H, len(fix_u_arr))):
+            model.Add(ubat[t] == int(fix_u_arr[t]))
 
     # -----------------------------------------------------------------
     # Recourse decisions (per scenario)
@@ -121,7 +135,6 @@ def solve_stochastic(theta: dict,
     P_bat_int   = int(p["P_bat"] * SC_P)
     P_max_grid  = int(20 * SC_P)
     P_HVAC_int  = int(p["P_HVAC_elec"] * SC_P)
-    P_load_int  = int(p["P_load_base"] * SC_P)
     SLACK_MAX   = int(35 * SC_T)   # widened to full T range so slacks
                                    # can absorb any deviation without forcing
                                    # infeasibility
@@ -206,9 +219,13 @@ def solve_stochastic(theta: dict,
 
             # --- Power balance ----------------------------------------
             PV_int = int(round(scen["PV"][t] * SC_P))
-            # Pgp - Pgn = P_HVAC*y + P_load + Pch - Pdis - PV
+            # Time-varying base load (kW) from the scenario; fall back
+            # to the constant default if the scenario does not carry it
+            load_kw = scen["load"][t] if "load" in scen else p["P_load_base"]
+            P_load_int_t = int(round(float(load_kw) * SC_P))
+            # Pgp - Pgn = P_HVAC*y + P_load(t) + Pch - Pdis - PV
             model.Add(Pgp_v[w][t] - Pgn_v[w][t]
-                      == P_HVAC_int * y[t] + P_load_int
+                      == P_HVAC_int * y[t] + P_load_int_t
                        + Pch_v[w][t] - Pdis_v[w][t] - PV_int)
 
             # --- Comfort slacks ---------------------------------------
