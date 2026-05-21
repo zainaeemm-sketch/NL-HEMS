@@ -43,8 +43,8 @@ st.set_page_config(page_title="NL-HEMS v2 (Journal Revision)",
 # Sidebar - global controls
 # =====================================================================
 with st.sidebar:
-    st.markdown("## NL-HEMS v2")
-    st.caption("Revision build addressing reviewer comments")
+    st.markdown("## NL-HEMS")
+    st.caption("Version 2")
 
     tab = st.radio("Navigation",
                    ["1. Overview",
