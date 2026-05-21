@@ -31,6 +31,7 @@ def generate_scenarios(context: dict,
                        sigma_Tout: float = 1.0,
                        sigma_price: float = 0.05,
                        sigma_pv: float = 0.15,
+                       sigma_load: float = 0.08,
                        seed: int = 0) -> List[Dict[str, np.ndarray]]:
     """
     Build N_s scenarios by perturbing the baseline context with
@@ -39,6 +40,8 @@ def generate_scenarios(context: dict,
     sigma_Tout : deg C    additive
     sigma_price: fraction multiplicative
     sigma_pv   : fraction multiplicative, clipped at 0
+    sigma_load : fraction multiplicative, clipped at 0 (residential
+                 non-HVAC base load uncertainty)
     """
     H = context["horizon"]
     rng = np.random.default_rng(seed)
@@ -47,15 +50,18 @@ def generate_scenarios(context: dict,
     base_T = np.asarray(context["T_out"], dtype=float)
     base_p = np.asarray(context["price"], dtype=float)
     base_pv = np.asarray(context["PV"], dtype=float)
+    base_load = np.asarray(context.get("load", np.full(H, 0.4)), dtype=float)
 
     for w in range(N_s):
         eT = ar1_path(rho, sigma_Tout, H, rng)
         ep = ar1_path(rho, sigma_price, H, rng)
         epv = ar1_path(rho, sigma_pv, H, rng)
+        eload = ar1_path(rho, sigma_load, H, rng)
         scenarios.append({
             "T_out": base_T + eT,
             "price": np.maximum(0.01, base_p * (1.0 + ep)),
             "PV":    np.maximum(0.0,  base_pv * (1.0 + epv)),
+            "load":  np.maximum(0.0,  base_load * (1.0 + eload)),
             "d":     np.asarray(context["d"], dtype=int),
             "prob":  1.0 / N_s,
         })
@@ -64,10 +70,12 @@ def generate_scenarios(context: dict,
 
 def deterministic_scenario(context: dict) -> List[Dict[str, np.ndarray]]:
     """Single point-forecast scenario; used to compute VSS."""
+    H = len(context["T_out"])
     return [{
         "T_out": np.asarray(context["T_out"], dtype=float),
         "price": np.asarray(context["price"], dtype=float),
         "PV":    np.asarray(context["PV"],    dtype=float),
+        "load":  np.asarray(context.get("load", np.full(H, 0.4)), dtype=float),
         "d":     np.asarray(context["d"],     dtype=int),
         "prob":  1.0,
     }]
