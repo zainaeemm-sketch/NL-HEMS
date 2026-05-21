@@ -272,8 +272,24 @@ def tab_single():
             "T_in mean": sol["T_in"].mean(axis=0)[1:],
             "Price (EUR/kWh)": ctx["price"],
         })
-        st.line_chart(df.set_index("hour")[["T_in mean"]])
-        st.bar_chart(df.set_index("hour")[["HVAC y", "Battery mode (1=charge)"]])
+        fig_t = px.line(df, x="hour", y="T_in mean",
+                        labels={"hour": "Hour (h)",
+                                "T_in mean": "Indoor temperature T_in (\u00b0C)"},
+                        title="Indoor temperature trajectory (scenario mean)")
+        fig_t.add_hline(y=theta["T_min"], line_dash="dot",
+                        line_color="firebrick",
+                        annotation_text=f"T_min = {theta['T_min']:.1f} \u00b0C")
+        st.plotly_chart(fig_t, use_container_width=True)
+
+        df_ctrl = df.melt(id_vars="hour",
+                          value_vars=["HVAC y", "Battery mode (1=charge)"],
+                          var_name="Signal", value_name="State")
+        fig_c = px.bar(df_ctrl, x="hour", y="State", color="Signal",
+                       barmode="group",
+                       labels={"hour": "Hour (h)",
+                               "State": "Control state y(t), u_bat(t) (\u2014)"},
+                       title="HVAC and battery control schedule")
+        st.plotly_chart(fig_c, use_container_width=True)
         st.dataframe(df, hide_index=True, use_container_width=True)
 
         st.subheader("Indicators")
@@ -296,7 +312,12 @@ def tab_benchmark():
     st.markdown("46 utterances stratified across 11 difficulty axes.")
 
     summary = pd.DataFrame(benchmark_summary())
-    st.bar_chart(summary.set_index("name")["n"])
+    fig_dist = px.bar(summary, x="name", y="n",
+                      labels={"name": "Difficulty axis",
+                              "n": "Number of utterances (\u2014)"},
+                      title="Benchmark composition by difficulty axis")
+    fig_dist.update_layout(xaxis_tickangle=-30)
+    st.plotly_chart(fig_dist, use_container_width=True)
 
     parsers = {
         "Stub":          StubParser(),
@@ -367,7 +388,11 @@ def tab_benchmark():
                       .reset_index())
         fig = px.bar(per_diff, x="difficulty", y="field_f1",
                      color="parser", barmode="group",
+                     labels={"difficulty": "Difficulty axis",
+                             "field_f1": "Field-level F1 score (\u2014)",
+                             "parser": "Parser"},
                      title="Field-level F1 by difficulty axis")
+        fig.update_layout(yaxis_range=[0, 1.05], xaxis_tickangle=-30)
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -502,9 +527,13 @@ decisions from the deterministic point-forecast problem.
         if rows:
             dft = pd.DataFrame(rows)
             fig = px.line(dft, x="hour", y="T_in (C)", color="method",
-                          title="Indoor temperature - three controllers")
+                          labels={"hour": "Hour (h)",
+                                  "T_in (C)": "Indoor temperature T_in (\u00b0C)",
+                                  "method": "Controller"},
+                          title="Indoor temperature trajectories \u2014 three controllers")
             fig.add_hline(y=theta["T_min"], line_dash="dot",
-                          annotation_text="T_min")
+                          line_color="firebrick",
+                          annotation_text=f"T_min = {theta['T_min']:.1f} \u00b0C")
             st.plotly_chart(fig, use_container_width=True)
 
 
@@ -566,11 +595,29 @@ live PVGIS fetch; otherwise the bundled cached profile is used.
 
     c1, c2 = st.columns(2)
     with c1:
-        st.line_chart(df.set_index("hour")[["T_out (C)"]])
-        st.bar_chart(df.set_index("hour")[["Price (EUR/kWh)"]])
+        fig_T = px.line(df, x="hour", y="T_out (C)",
+                        labels={"hour": "Hour (h)",
+                                "T_out (C)": "Outdoor temperature T_out (\u00b0C)"},
+                        title="Milan outdoor temperature")
+        st.plotly_chart(fig_T, use_container_width=True)
+
+        fig_p = px.bar(df, x="hour", y="Price (EUR/kWh)",
+                       labels={"hour": "Hour (h)",
+                               "Price (EUR/kWh)": "Electricity price p(t) (EUR/kWh)"},
+                       title="ARERA F1/F2/F3 residential tariff")
+        st.plotly_chart(fig_p, use_container_width=True)
     with c2:
-        st.area_chart(df.set_index("hour")[["PV (kW)"]])
-        st.line_chart(df.set_index("hour")[["Load (kW)"]])
+        fig_pv = px.area(df, x="hour", y="PV (kW)",
+                         labels={"hour": "Hour (h)",
+                                 "PV (kW)": "PV generation P^PV(t) (kW)"},
+                         title="PVGIS hourly PV generation (Milan)")
+        st.plotly_chart(fig_pv, use_container_width=True)
+
+        fig_ld = px.line(df, x="hour", y="Load (kW)",
+                         labels={"hour": "Hour (h)",
+                                 "Load (kW)": "Non-HVAC base load P^load(t) (kW)"},
+                         title="Italian residential consumption profile")
+        st.plotly_chart(fig_ld, use_container_width=True)
     st.dataframe(df, hide_index=True, use_container_width=True)
 
 
@@ -637,11 +684,23 @@ varies the **chance level alpha** and **scenario count N_s**.
         st.dataframe(df, hide_index=True, use_container_width=True)
         if not df.empty:
             fig1 = px.line(df, x="alpha", y="objective", color="N_s",
-                           markers=True, title="Objective vs alpha")
+                           markers=True,
+                           labels={"alpha": "Chance level \u03b1 (\u2014)",
+                                   "objective": "Objective J (\u2014)",
+                                   "N_s": "Scenarios N_s (\u2014)"},
+                           title="Stochastic objective vs chance level \u03b1")
             fig2 = px.line(df, x="alpha", y="mean_CV", color="N_s",
-                           markers=True, title="Mean comfort violation vs alpha")
+                           markers=True,
+                           labels={"alpha": "Chance level \u03b1 (\u2014)",
+                                   "mean_CV": "Mean comfort violation (h)",
+                                   "N_s": "Scenarios N_s (\u2014)"},
+                           title="Mean comfort violation vs chance level \u03b1")
             fig3 = px.line(df, x="N_s", y="wall_s", color="alpha",
-                           markers=True, title="Solve time vs N_s")
+                           markers=True,
+                           labels={"N_s": "Number of scenarios N_s (\u2014)",
+                                   "wall_s": "Solve time (s)",
+                                   "alpha": "Chance level \u03b1 (\u2014)"},
+                           title="CP-SAT solve time vs scenario count")
             st.plotly_chart(fig1, use_container_width=True)
             st.plotly_chart(fig2, use_container_width=True)
             st.plotly_chart(fig3, use_container_width=True)
@@ -718,7 +777,10 @@ show how a single sentence change reshapes the schedule.
         if traj:
             dft = pd.DataFrame(traj)
             fig = px.line(dft, x="hour", y="T_in", color="utterance",
-                          title="Indoor temperature for varying linguistic intensity")
+                          labels={"hour": "Hour (h)",
+                                  "T_in": "Indoor temperature T_in (\u00b0C)",
+                                  "utterance": "Utterance"},
+                          title="Indoor temperature under varying linguistic intensity")
             st.plotly_chart(fig, use_container_width=True)
 
 
