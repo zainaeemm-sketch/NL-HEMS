@@ -429,13 +429,27 @@ decisions from the deterministic point-forecast problem.
                               receding_horizon=12)
             t_m = time.time() - t0
 
-        # Compute VSS: evaluate deterministic plan's first-stage on the
-        # stochastic scenario set by re-solving with y/ubat fixed.
-        # (Approximation: re-solve with the same theta but on the same
-        #  scenario set as the stochastic case; gap to sol_s is the proxy.)
-        det_replay_obj = sol_d["objective"] if sol_d["feasible"] else None
-        vss = (value_of_stochastic_solution(sol_s["objective"], det_replay_obj)
-               if (det_replay_obj is not None and sol_s["feasible"]) else None)
+        # Proper VSS computation: take the deterministic plan's
+        # first-stage decisions (y, u_bat) and re-evaluate them on the
+        # stochastic scenario set. The resulting expected cost is the
+        # quantity to subtract from the stochastic optimum.
+        if sol_d["feasible"]:
+            with st.spinner("Evaluating deterministic plan on stochastic scenarios (for VSS)..."):
+                sol_d_eval = solve_stochastic(
+                    theta=theta, scenarios=scens, alpha=alpha,
+                    guest_window=gw,
+                    building=_building(E_bat, P_bat),
+                    fix_y=sol_d["y"], fix_ubat=sol_d["ubat"],
+                    time_limit_s=15)
+        else:
+            sol_d_eval = {"feasible": False, "objective": None}
+
+        # Proper VSS: E[cost(det_plan)] - SP_opt. Positive => stochastic wins.
+        if sol_s["feasible"] and sol_d_eval["feasible"]:
+            vss = value_of_stochastic_solution(
+                sol_s["objective"], sol_d_eval["objective"])
+        else:
+            vss = None
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Stochastic objective",
@@ -450,8 +464,27 @@ decisions from the deterministic point-forecast problem.
 
         st.subheader("Value of Stochastic Solution")
         if vss is not None:
-            st.success(f"VSS = {vss:.1f} (positive = stochastic improves on "
-                       f"deterministic when evaluated against uncertainty)")
+            colA, colB, colC = st.columns(3)
+            colA.metric("Stochastic objective",
+                        f"{sol_s['objective']:.0f}")
+            colB.metric("Det. plan eval'd on scenarios",
+                        f"{sol_d_eval['objective']:.0f}")
+            colC.metric("VSS", f"{vss:.0f}",
+                        delta="positive = stochastic wins" if vss > 0
+                              else "non-positive = stochastic ties det")
+            if vss > 0:
+                st.success(
+                    f"VSS = {vss:.1f}. "
+                    "The stochastic formulation strictly reduces the expected "
+                    "cost relative to applying the deterministic plan on the "
+                    "same scenario set.")
+            else:
+                st.info(
+                    f"VSS = {vss:.1f}. "
+                    "On this instance the stochastic optimum coincides with "
+                    "the deterministic plan when evaluated against the "
+                    "scenario set. Increase N_s, sigma, or alpha to surface "
+                    "the gap.")
         else:
             st.warning("VSS not computable (one of the problems was infeasible)")
 
@@ -479,15 +512,18 @@ decisions from the deterministic point-forecast problem.
 # TAB 5 - Real Milan Data (PVGIS + ARERA)
 # =====================================================================
 def tab_realdata():
-    st.title("Real Milan data: PVGIS + ARERA F1/F2/F3 tariff")
+    st.title("Real Milan data: PVGIS + ARERA F1/F2/F3 tariff + residential load")
     st.markdown("""
-This tab replaces the synthetic cosine PV profile and 2-9 unit price
-trace from the v1 paper with **real residential operating conditions
-for Milan, Italy**:
+This tab grounds the case study in **real Italian residential operating
+conditions for Milan**, replacing the synthetic profiles common in
+HEMS prototypes:
 
-  - **PV generation**: PVGIS-derived hourly profile for lat 45.464, lon 9.190
+  - **PV generation**: PVGIS hourly product for lat 45.464, lon 9.190
   - **Electricity price**: ARERA residential F1/F2/F3 bands
-  - **Outdoor temperature**: Milan May climatology
+  - **Outdoor temperature**: Milan climatology
+  - **Non-HVAC base load**: representative Italian residential consumption
+    shape with characteristic morning and evening peaks, calibrated to
+    typical family daily consumption (~8 kWh/day, excluding HVAC and EV)
   - **DR events**: 19h-20h evening peak (typical Italian residential)
 
 If the deployment environment allows outbound HTTPS, you can try a
@@ -507,6 +543,7 @@ live PVGIS fetch; otherwise the bundled cached profile is used.
         "T_out (C)":        np.asarray(ctx["T_out"]).ravel(),
         "Price (EUR/kWh)":  np.asarray(ctx["price"]).ravel(),
         "PV (kW)":          np.asarray(ctx["PV"]).ravel(),
+        "Load (kW)":        np.asarray(ctx["load"]).ravel(),
         "DR event":         np.asarray(ctx["d"]).ravel(),
     }
     H = min(int(horizon), *(len(a) for a in arrays.values()))
@@ -517,13 +554,23 @@ live PVGIS fetch; otherwise the bundled cached profile is used.
         "hour":  np.arange(H),
         **arrays,
     })
-    c1, c2, c3 = st.columns(3)
+
+    # Headline indicators
+    daily_load_kwh = float(arrays["Load (kW)"].sum())
+    daily_pv_kwh   = float(arrays["PV (kW)"].sum())
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Daily non-HVAC load",       f"{daily_load_kwh:.2f} kWh")
+    m2.metric("Daily PV generation",       f"{daily_pv_kwh:.2f} kWh")
+    m3.metric("PV / load ratio",
+              f"{daily_pv_kwh / max(1e-6, daily_load_kwh):.2f}")
+
+    c1, c2 = st.columns(2)
     with c1:
         st.line_chart(df.set_index("hour")[["T_out (C)"]])
-    with c2:
         st.bar_chart(df.set_index("hour")[["Price (EUR/kWh)"]])
-    with c3:
+    with c2:
         st.area_chart(df.set_index("hour")[["PV (kW)"]])
+        st.line_chart(df.set_index("hour")[["Load (kW)"]])
     st.dataframe(df, hide_index=True, use_container_width=True)
 
 
