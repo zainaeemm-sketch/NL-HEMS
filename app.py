@@ -1,16 +1,17 @@
 """
-NL-HEMS v2 - Conversational Home Energy Management with Stochastic
-              Optimization, Real Italian Data, and Reviewer Ablations.
+NL-HEMS - Conversational Home Energy Management with Stochastic
+          Optimization, Italian Tariff Integration, and Multi-Asset
+          Coordination of HVAC, Photovoltaic, and Battery Storage.
 
-Streamlit application: every tab maps to a paper revision concern.
+Streamlit dashboard exposing each component of the framework:
 
-  1. Overview            : architecture diagram + paper status
-  2. Single Command      : original end-to-end pipeline
-  3. Expanded Benchmark  : 46 utterances across 11 difficulty axes
-  4. Baseline Comparison : Stochastic vs Deterministic vs MPC + VSS
+  1. Overview            : architecture and methodological contributions
+  2. Single Command      : end-to-end conversational pipeline
+  3. Linguistic Benchmark: 46 utterances across 11 difficulty axes
+  4. Optimization Study  : Stochastic vs. Deterministic vs. MPC + VSS
   5. Real Milan Data     : PVGIS + ARERA F1/F2/F3 + outdoor temperature
-  6. Sensitivity Sweep   : alpha, N_s, lambda ratios
-  7. Novelty: alpha(z)   : linguistic-to-chance-level mapping
+  6. Sensitivity Analysis: parameter sweeps on alpha and N_s
+  7. Novel Contribution  : linguistic-to-chance-level mapping alpha(z)
 """
 from __future__ import annotations
 import time
@@ -35,7 +36,7 @@ from src.metrics     import (dr_score, self_consumption_ratio,
                              parser_summary)
 
 
-st.set_page_config(page_title="NL-HEMS v2 (Journal Revision)",
+st.set_page_config(page_title="NL-HEMS",
                    layout="wide", initial_sidebar_state="expanded")
 
 
@@ -44,16 +45,16 @@ st.set_page_config(page_title="NL-HEMS v2 (Journal Revision)",
 # =====================================================================
 with st.sidebar:
     st.markdown("## NL-HEMS")
-    st.caption("Version 2")
+    st.caption("Conversational HEMS with stochastic optimization")
 
     tab = st.radio("Navigation",
                    ["1. Overview",
                     "2. Single Command",
-                    "3. Expanded Benchmark",
-                    "4. Baseline Comparison",
+                    "3. Linguistic Benchmark",
+                    "4. Optimization Study",
                     "5. Real Milan Data",
-                    "6. Sensitivity Sweep",
-                    "7. Novelty: alpha(z)"],
+                    "6. Sensitivity Analysis",
+                    "7. alpha(z) Mapping"],
                    index=0)
 
     st.divider()
@@ -81,7 +82,9 @@ def _building(E_bat=10.0, P_bat=5.0):
 # TAB 1 - Overview
 # =====================================================================
 def tab_overview():
-    st.title("NL-HEMS v2 - Journal revision dashboard")
+    st.title("NL-HEMS: Conversational Home Energy Management")
+    st.markdown("*Stochastic coordination of HVAC, photovoltaic, and "
+                "battery storage with natural-language intent parsing.*")
 
     # ---------- LLM API status banner ----------
     llm = LLMParser()
@@ -138,22 +141,23 @@ Restart the app from *Manage app -> Reboot* after changing secrets.
     st.divider()
 
     st.markdown("""
-This build directly answers the reviewer feedback on the v1 manuscript.
-Each tab below corresponds to one revision point.
+This dashboard exposes each component of the NL-HEMS framework so the
+end-to-end behaviour, the underlying optimization model, and the
+language-understanding layer can be inspected separately.
 """)
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Reviewer concerns and how they are addressed")
+        st.subheader("Framework capabilities")
         st.markdown("""
-| Reviewer concern | Addressed in tab | Mechanism |
+| Capability | Demonstrated in tab | Implementation |
 |---|---|---|
-| Benchmark too small / saturated | **3. Expanded Benchmark** | 46 utterances across 11 difficulty axes (paraphrastic, adversarial, code-switched, medical) |
-| Missing baseline comparisons    | **4. Baseline Comparison** | Stochastic vs. Deterministic vs. MPC + Value of Stochastic Solution (VSS) |
-| Use of real data                | **5. Real Milan Data** | PVGIS irradiance + ARERA F1/F2/F3 + Milan May climatology |
-| Integration vs. novelty         | **7. Novelty: alpha(z)** | Linguistic intent -> chance-constraint level mapping |
-| Motivation through sensitivity  | **6. Sensitivity Sweep** | Sweeps over alpha, N_s, lambda ratios |
+| Linguistic robustness across paraphrastic, conflicting, code-switched, and adversarial inputs | **3. Linguistic Benchmark** | 46 utterances stratified across 11 difficulty axes |
+| Optimization-method comparison and value of stochastic solution | **4. Optimization Study** | Stochastic CP-SAT vs. Deterministic MILP vs. MPC, with VSS computed |
+| Real Italian residential operating context | **5. Real Milan Data** | PVGIS irradiance + ARERA F1/F2/F3 tariff bands + Milan climatology |
+| Linguistic risk tolerance drives the chance-constraint level | **7. alpha(z) Mapping** | Novel linguistic-to-chance-level function alpha(z) |
+| Parameter sensitivity and tractability characterisation | **6. Sensitivity Analysis** | Sweeps over alpha and scenario count N_s |
         """)
 
     with col2:
@@ -288,7 +292,7 @@ def tab_single():
 # TAB 3 - Expanded Benchmark
 # =====================================================================
 def tab_benchmark():
-    st.title("Expanded NL-HEMS benchmark (v2)")
+    st.title("Linguistic benchmark")
     st.markdown("46 utterances stratified across 11 difficulty axes.")
 
     summary = pd.DataFrame(benchmark_summary())
@@ -371,17 +375,18 @@ def tab_benchmark():
 # TAB 4 - Baseline comparison + VSS
 # =====================================================================
 def tab_baselines():
-    st.title("Baseline comparison: Stochastic vs Deterministic vs MPC")
+    st.title("Optimization study: Stochastic vs. Deterministic vs. MPC")
     st.markdown("""
-This tab is the reviewer-mandated optimization ablation. For a fixed
-intent we solve:
+For a fixed user intent, three controllers are solved on the same
+operating context:
 
-  - **Stochastic** : full two-stage CP-SAT on N_s scenarios
-  - **Deterministic** : single-point-forecast MILP (the v1 baseline)
+  - **Stochastic** : two-stage CP-SAT over N_s scenarios with chance-constrained comfort
+  - **Deterministic** : single-point-forecast MILP
   - **MPC** : receding-horizon deterministic re-solve at each hour
 
-and compute the **Value of Stochastic Solution (VSS)** by replaying
-the deterministic first-stage decisions on the same scenario set.
+The **Value of Stochastic Solution (VSS)** quantifies the cost gap
+that the stochastic formulation closes relative to fixing first-stage
+decisions from the deterministic point-forecast problem.
 """)
 
     utterance = st.text_input("Utterance",
@@ -599,10 +604,10 @@ varies the **chance level alpha** and **scenario count N_s**.
 # TAB 7 - Novelty: alpha(z)
 # =====================================================================
 def tab_novelty():
-    st.title("Novelty - linguistic-to-chance-level mapping alpha(z)")
+    st.title("Linguistic-to-chance-level mapping  alpha(z)")
     st.markdown("""
 Standard chance-constrained programming treats **alpha** as a fixed
-analyst-chosen hyperparameter. The v2 framework derives alpha from
+analyst-chosen hyperparameter. In this framework alpha is derived from
 the user's linguistic intent: insistent utterances and medical
 contexts push alpha towards 0 (deterministic hard constraint);
 hedged utterances expand the violation budget.
@@ -674,12 +679,12 @@ show how a single sentence change reshapes the schedule.
 # Router
 # =====================================================================
 ROUTES = {
-    "1. Overview":            tab_overview,
-    "2. Single Command":      tab_single,
-    "3. Expanded Benchmark":  tab_benchmark,
-    "4. Baseline Comparison": tab_baselines,
-    "5. Real Milan Data":     tab_realdata,
-    "6. Sensitivity Sweep":   tab_sensitivity,
-    "7. Novelty: alpha(z)":   tab_novelty,
+    "1. Overview":              tab_overview,
+    "2. Single Command":        tab_single,
+    "3. Linguistic Benchmark":  tab_benchmark,
+    "4. Optimization Study":    tab_baselines,
+    "5. Real Milan Data":       tab_realdata,
+    "6. Sensitivity Analysis":  tab_sensitivity,
+    "7. alpha(z) Mapping":      tab_novelty,
 }
 ROUTES[tab]()
