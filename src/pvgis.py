@@ -157,6 +157,60 @@ def outdoor_temperature_milan_may(horizon: int = 24) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------
+# Italian residential non-HVAC base-load profile
+# ---------------------------------------------------------------------
+def italian_residential_load_profile(horizon: int = 24,
+                                     weekday: int = 2,
+                                     daily_energy_kwh: float = 8.0,
+                                     ) -> np.ndarray:
+    """
+    Hourly non-HVAC base-load profile for an Italian residential
+    customer (kW). The shape captures the canonical two-peak diurnal
+    pattern of European residential consumption:
+
+      - Overnight base       (00:00-06:00) ~0.15 kW
+      - Morning ramp / peak  (06:00-09:00) up to ~0.65 kW
+      - Daytime              (09:00-17:00) ~0.30-0.50 kW
+      - Evening peak         (18:00-22:00) up to ~1.10 kW
+      - Late evening         (22:00-24:00) decay to ~0.30 kW
+
+    The profile is rescaled so its daily integral equals
+    ``daily_energy_kwh`` (default 8 kWh, representative of a family
+    apartment in an Italian urban context). Weekend days
+    (``weekday`` >= 5) carry a +10 % factor reflecting extended
+    daytime presence.
+    """
+    H = int(horizon)
+    hour = np.arange(H) % 24
+
+    # Shape parameters (kW) by hour-of-day band
+    base = np.empty(H, dtype=float)
+    for i, h in enumerate(hour):
+        if   h < 6:                       base[i] = 0.15
+        elif h < 7:                       base[i] = 0.30
+        elif h < 9:                       base[i] = 0.65   # morning peak
+        elif h < 11:                      base[i] = 0.40
+        elif h < 14:                      base[i] = 0.50
+        elif h < 17:                      base[i] = 0.30
+        elif h < 19:                      base[i] = 0.55
+        elif h < 22:                      base[i] = 1.05   # evening peak
+        elif h < 23:                      base[i] = 0.65
+        else:                             base[i] = 0.30
+
+    # Weekend uplift (Italian residential daytime presence)
+    if int(weekday) >= 5:
+        base = base * 1.10
+
+    # Rescale to the target daily energy over the first 24 h
+    day_window = base[:min(24, H)]
+    integral = float(day_window.sum())
+    if integral > 0 and daily_energy_kwh is not None:
+        base = base * (daily_energy_kwh / integral)
+
+    return base
+
+
+# ---------------------------------------------------------------------
 # Bundled "Real Milan" context
 # ---------------------------------------------------------------------
 def real_milan_context(horizon: int = 24,
@@ -180,6 +234,7 @@ def real_milan_context(horizon: int = 24,
     T_out = outdoor_temperature_milan_may(horizon)
     price = arera_price_profile(horizon, weekday=weekday)
     d     = dr_event_hours(horizon, hours=(19, 20))
+    load  = italian_residential_load_profile(horizon, weekday=weekday)
 
     # Defensive: guarantee every array has exactly ``horizon`` samples.
     def _resize(a, n):
@@ -196,12 +251,15 @@ def real_milan_context(horizon: int = 24,
     price = _resize(price, horizon)
     pv    = _resize(pv,    horizon)
     d     = _resize(d,     horizon).astype(int)
+    load  = _resize(load,  horizon)
 
     return {
         "T_out":  T_out,
         "price":  price,
         "PV":     pv,
+        "load":   load,
         "d":      d,
         "horizon": horizon,
-        "source": "PVGIS (cached) + ARERA F1/F2/F3 + Milan May climatology",
+        "source": "PVGIS (cached) + ARERA F1/F2/F3 + Milan climatology "
+                  "+ Italian residential load shape",
     }
