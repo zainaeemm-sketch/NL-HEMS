@@ -199,7 +199,7 @@ def tab_single():
     N_s = st.slider("Scenarios N_s", 1, 32, 8)
 
     utterance = st.text_input("Utterance",
-        value="Ho degli ospiti stasera, keep it warm but easy on la bolletta.")
+        value="Guests coming over tonight, keep it warm but watch the bill.")
 
     if st.button("Run pipeline", type="primary"):
         ctx = _real_context(horizon, peak_kwp)
