@@ -423,6 +423,10 @@ def tab_benchmark():
 
     if st.button("Run language-layer benchmark", type="primary"):
         rows = []
+        total_items = sum(1 for it in BENCHMARK
+                          if it.difficulty in diff_filter)
+        prog = st.progress(0.0, text="Starting...")
+        done = 0
         for parser_name in chosen:
             parser = parsers[parser_name]
             recs = []
@@ -430,6 +434,9 @@ def tab_benchmark():
             for item in BENCHMARK:
                 if item.difficulty not in diff_filter:
                     continue
+                prog.progress(done / max(1, total_items * len(chosen)),
+                              text=f"[{parser_name}] {item.sid}: "
+                                   f"{item.text[:60]}...")
                 pred = parser.parse(item.text).to_dict()
                 fm = field_match(pred, item.gold)
                 guest_match = int(pred.get("guest_flag") == item.gold.get("guest_flag"))
@@ -448,11 +455,13 @@ def tab_benchmark():
                 })
                 pred_clar.append(int(pred.get("clarification_needed", 0)))
                 gold_clar.append(int(item.needs_clarification))
+                done += 1
 
             clar = clarification_metrics(pred_clar, gold_clar)
             for r in recs:
                 r["clar_f1"] = clar["clar_f1"]
             rows.extend(recs)
+        prog.progress(1.0, text="Done")
 
         df = pd.DataFrame(rows)
         st.subheader("Per-utterance results")
