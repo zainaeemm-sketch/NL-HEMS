@@ -453,8 +453,8 @@ def tab_benchmark():
                     "predicted_comfort": pred.get("comfort_label"),
                     "gold_comfort": item.gold.get("comfort_label"),
                 })
-                pred_clar.append(int(pred.get("clarification_needed", 0)))
-                gold_clar.append(int(item.needs_clarification))
+                pred_clar.append(int(pred.get("clarification_needed") or 0))
+                gold_clar.append(int(item.needs_clarification or 0))
                 done += 1
 
             clar = clarification_metrics(pred_clar, gold_clar)
