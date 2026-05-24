@@ -302,9 +302,13 @@ class LLMParser:
 
             import json
             data = json.loads(text)
-            intent = Intent(parser_name=self.name, **{
-                k: v for k, v in data.items() if k in Intent.__annotations__
-            })
+            # LLM responses often contain null for "unknown" fields
+            # (the prompt explicitly invites this). Drop them so the
+            # dataclass defaults (0, "", None, ...) take over and
+            # downstream int() casts never see None.
+            clean = {k: v for k, v in data.items()
+                     if k in Intent.__annotations__ and v is not None}
+            intent = Intent(parser_name=self.name, **clean)
             return intent
         except Exception as e:
             self._last_error = f"call: {type(e).__name__}: {e}"
