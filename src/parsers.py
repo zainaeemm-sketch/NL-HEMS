@@ -201,18 +201,26 @@ class LLMParser:
         self._model       = None
         self._base_url    = None
         self._last_error  = None
+        self._is_reasoning = False
         try:
             import streamlit as st
             secrets = st.secrets
             if "OPENAI_API_KEY" in secrets:
                 import openai
-                # OpenAI-compatible endpoints (VectorEngine, Together, Azure
-                # via proxy, OpenRouter, ...) are supported by passing
-                # base_url to the OpenAI client. Model name is also taken
-                # from secrets when present.
                 self._base_url = secrets.get("OPENAI_BASE_URL", None)
                 self._model    = secrets.get("LLM_MODEL", "gpt-4o-mini")
-                kwargs = {"api_key": secrets["OPENAI_API_KEY"]}
+                # Reasoning models (o1/o3/o4 family, gpt-5 family) reject
+                # `max_tokens` and need `max_completion_tokens`; they also
+                # reject `temperature` overrides.
+                self._is_reasoning = any(
+                    self._model.lower().startswith(p)
+                    for p in ("o1", "o3", "o4", "gpt-5")
+                )
+                kwargs = {
+                    "api_key":     secrets["OPENAI_API_KEY"],
+                    "timeout":     30.0,   # seconds per call, prevents 46x hangs
+                    "max_retries": 1,
+                }
                 if self._base_url:
                     kwargs["base_url"] = self._base_url
                 self._client  = openai.OpenAI(**kwargs)
@@ -220,7 +228,8 @@ class LLMParser:
             elif "ANTHROPIC_API_KEY" in secrets:
                 import anthropic
                 self._client  = anthropic.Anthropic(
-                    api_key=secrets["ANTHROPIC_API_KEY"])
+                    api_key=secrets["ANTHROPIC_API_KEY"],
+                    timeout=30.0)
                 self._model   = secrets.get("LLM_MODEL",
                                             "claude-haiku-4-5-20251001")
                 self._backend = "anthropic"
@@ -247,21 +256,24 @@ class LLMParser:
         prompt = self._build_prompt(utterance)
         try:
             if self._backend == "openai":
-                # Reasoning-style models (gpt-5-*, o1, o3, ...) consume
-                # tokens internally before any visible output; we therefore
-                # use a generous budget. We also do not pass `temperature`
-                # because newer reasoning models reject it.
-                resp = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1500,
-                )
+                if self._is_reasoning:
+                    # Reasoning models burn tokens on internal CoT before
+                    # any output. The 5000 budget covers reasoning + a
+                    # ~150-token JSON. No temperature: they reject it.
+                    resp = self._client.chat.completions.create(
+                        model=self._model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_completion_tokens=5000,
+                    )
+                else:
+                    resp = self._client.chat.completions.create(
+                        model=self._model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=400,
+                        temperature=0.0,
+                    )
                 text = resp.choices[0].message.content or ""
 
-                # Empty body is the failure mode we hit with reasoning
-                # models when the token budget is exhausted before any
-                # output is emitted. Surface the raw response so the
-                # diagnostic banner can show what the proxy returned.
                 if not text.strip():
                     try:
                         snippet = resp.model_dump_json()[:400]
