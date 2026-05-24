@@ -720,7 +720,7 @@ decisions from the deterministic point-forecast problem.
 
                 metrics_rows.append({
                     "Method":         label,
-                    "Objective":      f"{sol_orig['objective']:.0f}",
+                    "Objective":      f"{sol_eval['objective']:.0f}",
                     "Mean CV (min)":  f"{mean_cv:.1f}",
                     "CVaR_0.2 (min)": f"{cvar_cv:.1f}",
                     "DR comp. (%)":   f"{dr_comp:.1f}",
