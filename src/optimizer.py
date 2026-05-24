@@ -64,7 +64,7 @@ def solve_stochastic(theta: dict,
                      alpha: float = 0.20,
                      guest_window: tuple[int, int] | None = None,
                      building: dict | None = None,
-                     time_limit_s: float = 30.0,
+                     time_limit_s: float = 120.0,
                      verbose: bool = False,
                      fix_y: np.ndarray | None = None,
                      fix_ubat: np.ndarray | None = None) -> Dict[str, Any]:
