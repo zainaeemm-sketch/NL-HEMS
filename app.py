@@ -32,6 +32,7 @@ from src.metrics     import (dr_score, self_consumption_ratio,
                              comfort_violation_count, cvar_alpha,
                              robust_feasibility_rate,
                              value_of_stochastic_solution,
+                             expected_value_perfect_information,
                              field_match, clarification_metrics,
                              parser_summary)
 
@@ -637,6 +638,119 @@ decisions from the deterministic point-forecast problem.
                     "the gap.")
         else:
             st.warning("VSS not computable (one of the problems was infeasible)")
+
+        # ================================================================
+        # FULL TABLE III METRICS — computes the six per-controller numbers
+        # plus EVPI that the paper's Table III requires.
+        # Skipped if the stochastic baseline itself is infeasible, since
+        # every metric in Table III is defined relative to it.
+        # ================================================================
+        if not sol_s.get("feasible"):
+            st.error("Stochastic problem infeasible \u2014 Table III "
+                     "metrics cannot be computed. Adjust theta or "
+                     "scenarios and retry.")
+        else:
+            st.subheader("Table III metrics (full controller comparison)")
+
+            # 1) For each controller, get T_in trajectories on the stochastic
+            #    scenario set. Stochastic already has them; Deterministic was
+            #    replayed above (sol_d_eval); MPC needs the same replay.
+            if sol_m.get("feasible"):
+                with st.spinner("Replaying MPC plan on stochastic scenarios..."):
+                    sol_m_eval = solve_stochastic(
+                        theta=theta, scenarios=scens, alpha=alpha,
+                        guest_window=gw,
+                        building=_building(E_bat, P_bat),
+                        fix_y=sol_m["y"], fix_ubat=sol_m["ubat"],
+                        time_limit_s=15)
+            else:
+                sol_m_eval = {"feasible": False}
+
+            # 2) Wait-and-see solves for EVPI: solve the stochastic program
+            #    one scenario at a time with no fix; the average optimum is
+            #    the expected wait-and-see cost.
+            with st.spinner(f"Computing EVPI ({N_s} wait-and-see solves)..."):
+                ws_objectives = []
+                for w in range(N_s):
+                    sol_w = solve_stochastic(
+                        theta=theta, scenarios=[scens[w]], alpha=alpha,
+                        guest_window=gw,
+                        building=_building(E_bat, P_bat),
+                        time_limit_s=15)
+                    if sol_w.get("feasible"):
+                        ws_objectives.append(sol_w["objective"])
+                ws_avg = float(np.mean(ws_objectives)) if ws_objectives else None
+
+            evpi = (expected_value_perfect_information(sol_s["objective"], ws_avg)
+                    if (ws_avg is not None and sol_s.get("feasible")) else None)
+
+            # 3) Per-controller metrics
+            T_min = float(theta["T_min"])
+            d_vec = np.asarray(ctx.get("d", np.zeros(len(ctx["T_out"]))), dtype=int)
+
+            controllers = [
+                ("Stochastic",     sol_s,      sol_s,      t_s),
+                ("Deterministic",  sol_d_eval, sol_d,      t_d),
+                ("MPC ($H_r=12$)", sol_m_eval, sol_m,      t_m),
+            ]
+
+            metrics_rows = []
+            for label, sol_eval, sol_orig, t_solve in controllers:
+                if not sol_eval.get("feasible") or not sol_orig.get("feasible"):
+                    metrics_rows.append({
+                        "Method":         label,
+                        "Objective":      "infeasible",
+                        "Mean CV (min)":  "---",
+                        "CVaR_0.2 (min)": "---",
+                        "DR comp. (%)":   "---",
+                        "RFR (%)":        "---",
+                        "Solve time (s)": f"{t_solve:.1f}",
+                    })
+                    continue
+
+                T_in_arr   = sol_eval["T_in"]  # (N_scen, H+1)
+                vio_hours  = [comfort_violation_count(T_in_arr[w], T_min)
+                              for w in range(T_in_arr.shape[0])]
+                mean_cv    = float(np.mean(vio_hours)) * 60.0   # h -> min
+                cvar_cv    = cvar_alpha(vio_hours, 0.2) * 60.0  # h -> min
+                n_clean    = sum(1 for v in vio_hours if v == 0)
+                rfr_pct    = 100.0 * n_clean / max(1, len(vio_hours))
+                y_used     = np.asarray(sol_orig["y"], dtype=int)
+                dr_comp    = 100.0 * dr_score(y_used, d_vec)
+
+                metrics_rows.append({
+                    "Method":         label,
+                    "Objective":      f"{sol_orig['objective']:.0f}",
+                    "Mean CV (min)":  f"{mean_cv:.1f}",
+                    "CVaR_0.2 (min)": f"{cvar_cv:.1f}",
+                    "DR comp. (%)":   f"{dr_comp:.1f}",
+                    "RFR (%)":        f"{rfr_pct:.1f}",
+                    "Solve time (s)": f"{t_solve:.1f}",
+                })
+
+            df_t3 = pd.DataFrame(metrics_rows)
+            st.dataframe(df_t3, hide_index=True, use_container_width=True)
+
+            cA, cB = st.columns(2)
+            cA.metric("VSS", f"{vss:.1f}" if vss is not None else "n/a",
+                      help="Value of Stochastic Solution")
+            cB.metric("EVPI", f"{evpi:.1f}" if evpi is not None else "n/a",
+                      help="Expected Value of Perfect Information")
+
+            # CSV export — paste this into chat to get the Table III LaTeX
+            csv_bytes = df_t3.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download Table III data as CSV",
+                csv_bytes,
+                file_name="table3_optimization_comparison.csv",
+                mime="text/csv",
+                help="Send this CSV (and the VSS/EVPI numbers above) to fill Table III in the manuscript."
+            )
+
+            # Show VSS / EVPI as plain text for easy copy-paste
+            st.code(f"VSS  = {vss:.1f}\nEVPI = {evpi:.1f}" if (vss is not None and evpi is not None)
+                    else f"VSS  = {vss}\nEVPI = {evpi}",
+                    language=None)
 
         # Indoor temperature comparison
         st.subheader("Indoor temperature trajectories")
