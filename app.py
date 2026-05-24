@@ -388,9 +388,34 @@ def tab_benchmark():
         "Simulated-LLM": SimulatedLLMParser(),
         "LLM (real or simulated fallback)": LLMParser(),
     }
+
+    # Show LLM status prominently on this tab too, so users don't have
+    # to switch to Overview to find out their key isn't wired up.
+    _bench_llm = parsers["LLM (real or simulated fallback)"]
+    _bench_status = _bench_llm.status()
+    if _bench_status["client_ready"]:
+        st.success(
+            f"\u2705 Real LLM ready \u2014 backend "
+            f"**{_bench_status['backend']}**, model "
+            f"**{_bench_status['model']}**"
+            + (f", base URL `{_bench_status['base_url']}`"
+               if _bench_status['base_url'] else "")
+        )
+    else:
+        st.warning(
+            "\u26A0\uFE0F  Real LLM client **not configured**. The "
+            "\"LLM (real or simulated fallback)\" row in the results "
+            "will be the simulated parser silently impersonating the "
+            "real one. Set `OPENAI_API_KEY` (and optionally "
+            "`OPENAI_BASE_URL`, `LLM_MODEL`) in Streamlit secrets and "
+            "reload."
+            + (f"\n\nInitialisation error: `{_bench_status['last_error']}`"
+               if _bench_status['last_error'] else "")
+        )
+
     chosen = st.multiselect("Parsers to evaluate",
                             list(parsers.keys()),
-                            default=["Stub", "Simulated-LLM"])
+                            default=list(parsers.keys()))
 
     diff_filter = st.multiselect("Restrict to difficulty axes",
                                  list(DIFFICULTY_NAMES.keys()),
@@ -444,6 +469,31 @@ def tab_benchmark():
         agg["guest_acc"]  *= 100
         agg["fallback"]   *= 100
         st.dataframe(agg)
+
+        # Loud warning if the "real LLM" parser ran but fell back to
+        # simulated on every single call. The numbers in this case are
+        # NOT real LLM numbers; they are simulated-parser numbers.
+        llm_row = agg.index[agg.index.str.contains("LLM \\(real")]
+        if len(llm_row) > 0 and agg.loc[llm_row[0], "fallback"] >= 99:
+            last_err = _bench_status.get("last_error") or \
+                       getattr(_bench_llm, "_last_error", None) or \
+                       "no error captured \u2014 see Streamlit logs"
+            st.error(
+                "\U0001F6A8 **Every real-LLM call fell back to the "
+                "simulated parser** (fallback rate "
+                f"{agg.loc[llm_row[0], 'fallback']:.0f}%). The numbers "
+                "in the \"LLM (real or simulated fallback)\" row are "
+                "the simulated parser, not the real LLM. Diagnose "
+                "before using them in the paper.\n\n"
+                f"Last captured error: `{last_err}`"
+            )
+        elif len(llm_row) > 0 and agg.loc[llm_row[0], "fallback"] > 0:
+            st.warning(
+                f"\u26A0\uFE0F  Real-LLM partial fallback: "
+                f"{agg.loc[llm_row[0], 'fallback']:.0f}% of calls fell "
+                "back to the simulated parser. Reported numbers are a "
+                "mix of real and simulated."
+            )
 
         st.subheader("Per-difficulty breakdown")
         per_diff = (df.groupby(["parser", "difficulty"])
