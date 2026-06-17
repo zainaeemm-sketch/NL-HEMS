@@ -19,11 +19,19 @@ def solve_deterministic(theta: dict,
                         context: dict,
                         guest_window: tuple[int, int] | None = None,
                         building: dict | None = None,
-                        time_limit_s: float = 10.0) -> Dict[str, Any]:
-    """Deterministic baseline: solve over a single point-forecast scenario."""
-    scen = deterministic_scenario(context)
+                        time_limit_s: float = 30.0) -> dict:
+    """Deterministic baseline: a single optimization over the
+    point-forecast (historical-average) context, with HARD comfort.
+ 
+    With a single scenario the two-stage model collapses to one set of
+    variables, so this is exactly a single-shot deterministic program.
+    alpha is fixed to 0.0  ->  hard comfort bound T_in >= T_min for all t
+    (the alpha->0 limit of the chance constraint). This is the value
+    that enters the VSS as the expected-value plan.
+    """
+    scen = deterministic_scenario(context)          # mean price/temp/PV
     out = solve_stochastic(theta=theta, scenarios=scen,
-                           alpha=0.0 if guest_window else 1.0,
+                           alpha=0.0,               # <-- HARD comfort, always
                            guest_window=guest_window,
                            building=building,
                            time_limit_s=time_limit_s)
