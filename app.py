@@ -1057,23 +1057,21 @@ show how a single sentence change reshapes the schedule.
 # =====================================================================
 def tab_reviewer():
     st.title("Reviewer study: Deterministic vs. Stochastic, and the alpha-ablation")
-    st.markdown("""
-Runs the experiments requested in review:
-**(1)** a single-shot **deterministic** baseline on the historical-average
-context (hard comfort), **(2)** the **stochastic** controller with the
-linguistic level `alpha(z)`, **(3)** the same stochastic controller
-**without** the chance constraint (`alpha = 0`) as an ablation, all on
-the **same** `N_s` scenarios. MPC is not included.
-""")
+    st.markdown("Runs the review experiments **in-app**. No MPC. "
+                "Start small (N_s=8, budget 60s, EVPI off) to confirm it works.")
 
     utterance = st.text_input("Utterance",
         value="Guests staying late, keep it warm but watch the bill.")
-    N_s   = st.slider("Scenarios N_s", 8, 40, 32)
+    N_s   = st.slider("Scenarios N_s", 4, 40, 16)
     alpha = st.slider("alpha(z) (chance level for the 'with' case)", 0.0, 0.5, 0.2, 0.05)
-    tlim  = st.slider("Solver budget per solve (s)", 30, 600, 300, 30,
-                      help="Raise this until VSS >= 0 (the stochastic solve must reach optimality).")
+    tlim  = st.slider("Solver budget per solve (s)", 30, 600, 90, 30)
+    do_evpi = st.checkbox("Also compute EVPI (slow: N_s extra solves)", value=False)
 
-    if st.button("Run reviewer study", type="primary"):
+    if not st.button("Run reviewer study", type="primary"):
+        return
+
+    try:
+        status = st.status("Setting up...", expanded=True)
         ctx = _real_context(horizon, peak_kwp)
         intent = SimulatedLLMParser().parse(utterance).to_dict()
         theta  = triangular_map(intent)
@@ -1086,82 +1084,86 @@ the **same** `N_s` scenarios. MPC is not included.
         T_min = float(theta["T_min"])
         d_vec = np.asarray(ctx.get("d", np.zeros(len(ctx["T_out"]))), dtype=int)
 
-        # ---- solves ----
-        with st.spinner("Stochastic WITH chance constraint (alpha=alpha(z))..."):
-            t0=time.time(); sol_s = solve_stochastic(theta, scens, alpha=alpha,
-                guest_window=gw, building=bld, time_limit_s=tlim); t_s=time.time()-t0
-        with st.spinner("Stochastic WITHOUT chance constraint (alpha=0)..."):
-            t0=time.time(); sol_h = solve_stochastic(theta, scens, alpha=0.0,
-                guest_window=gw, building=bld, time_limit_s=tlim); t_h=time.time()-t0
-        with st.spinner("Deterministic baseline (single-shot, hard comfort)..."):
-            t0=time.time(); sol_d = solve_deterministic(theta, ctx,
-                guest_window=gw, building=bld); t_d=time.time()-t0
+        status.update(label="Solving stochastic WITH chance constraint...")
+        t0=time.time(); sol_s = solve_stochastic(theta, scens, alpha=alpha,
+            guest_window=gw, building=bld, time_limit_s=tlim); t_s=time.time()-t0
 
-        # ---- replay deterministic plan on the scenario set (for VSS + metrics) ----
+        status.update(label="Solving stochastic WITHOUT chance constraint (alpha=0)...")
+        t0=time.time(); sol_h = solve_stochastic(theta, scens, alpha=0.0,
+            guest_window=gw, building=bld, time_limit_s=tlim); t_h=time.time()-t0
+
+        status.update(label="Solving deterministic baseline...")
+        t0=time.time(); sol_d = solve_deterministic(theta, ctx,
+            guest_window=gw, building=bld); t_d=time.time()-t0
+
+        status.update(label="Replaying deterministic plan on scenarios (for VSS)...")
         sol_d_eval = (solve_stochastic(theta=theta, scenarios=scens, alpha=alpha,
                         guest_window=gw, building=bld,
                         fix_y=sol_d["y"], fix_ubat=sol_d["ubat"], time_limit_s=tlim)
-                      if sol_d["feasible"] else {"feasible": False, "objective": None})
-
+                      if sol_d.get("feasible") else {"feasible": False, "objective": None})
         vss = (value_of_stochastic_solution(sol_s["objective"], sol_d_eval["objective"])
-               if (sol_s["feasible"] and sol_d_eval.get("feasible")) else None)
+               if (sol_s.get("feasible") and sol_d_eval.get("feasible")) else None)
+        status.update(label="Solves done.", state="complete")
 
-        # ---- EVPI: wait-and-see average over the N_s scenarios ----
-        with st.spinner(f"EVPI ({N_s} wait-and-see solves)..."):
-            ws=[]
-            for w in range(N_s):
-                sw = solve_stochastic(theta=theta, scenarios=[scens[w]], alpha=alpha,
-                                      guest_window=gw, building=bld, time_limit_s=30)
-                if sw.get("feasible"): ws.append(sw["objective"])
-            ws_avg = float(np.mean(ws)) if ws else None
-        evpi = (expected_value_perfect_information(sol_s["objective"], ws_avg)
-                if (ws_avg is not None and sol_s["feasible"]) else None)
+        # quick visibility into raw feasibility/objectives
+        st.write({"stochastic_feasible": sol_s.get("feasible"),
+                  "deterministic_feasible": sol_d.get("feasible"),
+                  "hard_feasible": sol_h.get("feasible"),
+                  "stochastic_obj": sol_s.get("objective"),
+                  "deterministic_obj": sol_d.get("objective")})
 
-        # ---- shared metric-row builder ----
         def row(label, sol_eval, sol_orig, t_solve):
             if not sol_eval.get("feasible") or not sol_orig.get("feasible"):
                 return {"Method":label,"Objective":"infeasible","Mean CV (min)":"---",
                         "CVaR_0.2 (min)":"---","DR comp. (%)":"---","RFR (%)":"---",
                         "Solve time (s)":f"{t_solve:.1f}"}
             T = sol_eval["T_in"]
-            vio = [comfort_violation_count(T[w], T_min) for w in range(T.shape[0])]
-            n_clean = sum(1 for v in vio if v == 0)
-            return {"Method":label,
-                    "Objective":f"{sol_eval['objective']:.0f}",
+            vio=[comfort_violation_count(T[w],T_min) for w in range(T.shape[0])]
+            n_clean=sum(1 for v in vio if v==0)
+            return {"Method":label,"Objective":f"{sol_eval['objective']:.0f}",
                     "Mean CV (min)":f"{np.mean(vio)*60.0:.1f}",
                     "CVaR_0.2 (min)":f"{cvar_alpha(vio,0.2)*60.0:.1f}",
                     "DR comp. (%)":f"{100.0*dr_score(np.asarray(sol_orig['y'],dtype=int),d_vec):.1f}",
                     "RFR (%)":f"{100.0*n_clean/max(1,len(vio)):.1f}",
                     "Solve time (s)":f"{t_solve:.1f}"}
 
-        # ---- Table III (no MPC) ----
         st.subheader("Table III (no MPC): Stochastic vs. Deterministic")
-        df_t3 = pd.DataFrame([
-            row("Stochastic",    sol_s,      sol_s, t_s),
-            row("Deterministic", sol_d_eval, sol_d, t_d),
-        ])
+        df_t3 = pd.DataFrame([row("Stochastic", sol_s, sol_s, t_s),
+                              row("Deterministic", sol_d_eval, sol_d, t_d)])
         st.dataframe(df_t3, hide_index=True, use_container_width=True)
-        cA,cB = st.columns(2)
-        cA.metric("VSS",  f"{vss:.1f}"  if vss  is not None else "n/a",
-                  help="Must be >= 0. If negative, raise the solver budget.")
-        cB.metric("EVPI", f"{evpi:.1f}" if evpi is not None else "n/a")
+        st.metric("VSS", f"{vss:.1f}" if vss is not None else "n/a",
+                  help="Must be >= 0; raise the budget if negative.")
         st.download_button("Download table3_no_mpc.csv",
             df_t3.to_csv(index=False).encode("utf-8"),
             file_name="table3_no_mpc.csv", mime="text/csv")
 
-        # ---- alpha-ablation ----
         st.subheader("Alpha-ablation: chance constraint ON vs OFF")
         df_ab = pd.DataFrame([
-            row("Without chance constraint (alpha=0)",      sol_h, sol_h, t_h),
-            row("With chance constraint (alpha=alpha(z))",  sol_s, sol_s, t_s),
-        ])
+            row("Without chance constraint (alpha=0)",     sol_h, sol_h, t_h),
+            row("With chance constraint (alpha=alpha(z))", sol_s, sol_s, t_s)])
         st.dataframe(df_ab, hide_index=True, use_container_width=True)
-        if sol_s["feasible"] and sol_h["feasible"]:
+        if sol_s.get("feasible") and sol_h.get("feasible"):
             st.metric("Cost saved by allowing bounded risk (Delta objective)",
                       f"{sol_h['objective'] - sol_s['objective']:.0f}")
         st.download_button("Download alpha_ablation.csv",
             df_ab.to_csv(index=False).encode("utf-8"),
             file_name="alpha_ablation.csv", mime="text/csv")
+
+        if do_evpi:
+            with st.spinner(f"EVPI ({N_s} wait-and-see solves)..."):
+                ws=[]
+                for w in range(N_s):
+                    sw=solve_stochastic(theta=theta, scenarios=[scens[w]], alpha=alpha,
+                                        guest_window=gw, building=bld, time_limit_s=30)
+                    if sw.get("feasible"): ws.append(sw["objective"])
+                ws_avg=float(np.mean(ws)) if ws else None
+            evpi=(expected_value_perfect_information(sol_s["objective"], ws_avg)
+                  if (ws_avg is not None and sol_s.get("feasible")) else None)
+            st.metric("EVPI", f"{evpi:.1f}" if evpi is not None else "n/a")
+
+    except Exception as e:
+        st.error("The run raised an exception:")
+        st.exception(e)
               
 # =====================================================================
 # Router
