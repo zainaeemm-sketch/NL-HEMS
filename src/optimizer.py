@@ -66,7 +66,7 @@ def solve_stochastic(theta: dict,
                      building: dict | None = None,
                      time_limit_s: float = 120.0,
                      verbose: bool = False,
-                      fix_y: np.ndarray | None = None,
+                     fix_y: np.ndarray | None = None,
                      fix_ubat: np.ndarray | None = None,
                      hint_y: np.ndarray | None = None,
                      hint_ubat: np.ndarray | None = None) -> Dict[str, Any]:
@@ -110,11 +110,11 @@ def solve_stochastic(theta: dict,
         fix_y_arr = np.asarray(fix_y, dtype=int).ravel()
         for t in range(min(H, len(fix_y_arr))):
             model.Add(y[t] == int(fix_y_arr[t]))
-     if fix_ubat is not None:
+    if fix_ubat is not None:
         fix_u_arr = np.asarray(fix_ubat, dtype=int).ravel()
         for t in range(min(H, len(fix_u_arr))):
             model.Add(ubat[t] == int(fix_u_arr[t]))
- 
+
     # Warm-start: bias the search toward a known feasible plan (e.g. the
     # deterministic solution). The optimum can only improve on it, so the
     # stochastic objective never comes out worse than the warm-start plan.
@@ -307,7 +307,7 @@ def solve_stochastic(theta: dict,
         "feasible":        status in (cp_model.OPTIMAL, cp_model.FEASIBLE),
         "objective":       solver.ObjectiveValue() if status in
                             (cp_model.OPTIMAL, cp_model.FEASIBLE) else None,
-          "wall_time_s":     solver.WallTime(),
+        "wall_time_s":     solver.WallTime(),
         "best_bound":      (solver.BestObjectiveBound() if status in
                             (cp_model.OPTIMAL, cp_model.FEASIBLE) else None),
         "optimal":         status == cp_model.OPTIMAL,
