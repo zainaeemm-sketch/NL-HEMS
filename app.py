@@ -106,7 +106,7 @@ with st.sidebar:
     st.markdown("## NL-HEMS")
     st.caption("Conversational HEMS with stochastic optimization")
 
-  tab = st.radio("Navigation",
+    tab = st.radio("Navigation",
                    ["1. Overview",
                     "2. Single Command",
                     "3. Linguistic Benchmark",
@@ -1174,5 +1174,6 @@ ROUTES = {
     "5. Real Milan Data":       tab_realdata,
     "6. Sensitivity Analysis":  tab_sensitivity,
     "7. alpha(z) Mapping":      tab_novelty,
+    "8. Reviewer Study":        tab_reviewer,
 }
 ROUTES[tab]()
