@@ -251,9 +251,11 @@ def solve_stochastic(theta: dict,
         if alpha < 1.0 and guest_window is not None:
             ws, we = guest_window
             ws = max(0, ws); we = min(H, we)
-            BIG_M = int(20 * SC_T)
+            # Reified comfort: if scenario w is NOT relaxed (z=0), enforce the
+            # hard bound; if relaxed (z=1), drop it. Native CP-SAT indicator is
+            # far tighter than Big-M -> dramatically smaller optimality gap.
             for t in range(ws, we):
-                model.Add(T_in_v[w][t+1] >= T_min_int - BIG_M * z_v[w])
+                model.Add(T_in_v[w][t+1] >= T_min_int).OnlyEnforceIf(z_v[w].Not())
 
     # Probability-weighted relaxation cap (scenarios are uniform)
     if alpha < 1.0 and guest_window is not None and alpha < 1.0 - 1e-9:
