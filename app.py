@@ -1058,9 +1058,9 @@ show how a single sentence change reshapes the schedule.
 def tab_reviewer():
     import traceback
     st.title("Reviewer study: Deterministic vs. Stochastic + alpha-ablation")
-    st.markdown("In-app, no MPC. Comfort is measured **inside the guest window** "
-                "(where the chance constraint acts). The **window dip** makes that "
-                "window the hard, expensive part so alpha has something to relax.")
+    st.markdown("In-app, no MPC. Comfort measured **in-window**. Lower **HVAC "
+                "capacity** until keeping the window warm in every scenario "
+                "becomes costly -- that is when alpha binds.")
 
     utterance = st.text_input("Utterance",
         value="Guests staying late, keep it warm but watch the bill.")
@@ -1068,12 +1068,13 @@ def tab_reviewer():
     with c1:
         N_s   = st.slider("Scenarios N_s", 4, 40, 12)
         alpha = st.slider("alpha(z) (with-case)", 0.0, 0.5, 0.3, 0.05)
-        tlim  = st.slider("Solver budget per solve (s)", 30, 600, 300, 30)
+        tlim  = st.slider("Solver budget per solve (s)", 30, 600, 180, 30)
     with c2:
-        cold     = st.slider("Base cold shift (deg C, all hours)", 0, 12, 4)
-        win_dip  = st.slider("Guest-window EXTRA cold dip (deg C)", 0, 12, 6,
-                             help="Applied only during the guest window, on top of base cold.")
-        spread   = st.slider("Scenario spread sigma_Tout (deg C)", 1.0, 6.0, 2.5, 0.5)
+        cold     = st.slider("Base cold shift (deg C)", 0, 12, 4)
+        win_dip  = st.slider("Guest-window EXTRA cold dip (deg C)", 0, 12, 6)
+        spread   = st.slider("Scenario spread sigma_Tout (deg C)", 1.0, 6.0, 3.0, 0.5)
+    hvac = st.slider("HVAC thermal power kappa (kW)", 0.8, 3.0, 1.5, 0.1,
+                     help="Default is 3.0. Lower it to make comfort hard to hold during the cold window.")
     run = st.button("Run reviewer study", type="primary")
 
     if run:
@@ -1084,10 +1085,7 @@ def tab_reviewer():
             theta  = triangular_map(intent)
             gw = None
             if intent.get("guest_flag") == 1:
-                gw = (int(intent.get("window_start") or 19),
-                      int(intent.get("window_end")   or 23))
-
-            # base cold everywhere + extra dip inside the guest window
+                gw = (int(intent.get("window_start") or 19), int(intent.get("window_end") or 23))
             Tout = np.asarray(ctx["T_out"], dtype=float) - float(cold)
             if gw is not None:
                 for t in range(gw[0], min(gw[1] + 1, len(Tout))):
@@ -1095,7 +1093,7 @@ def tab_reviewer():
             ctx["T_out"] = Tout.tolist()
 
             scens = generate_scenarios(ctx, N_s=N_s, sigma_Tout=spread, seed=42)
-            bld   = _building(E_bat, P_bat)
+            bld   = {"E_bat": E_bat, "P_bat": P_bat, "kappa": float(hvac)}   # <-- reduced HVAC
             T_min = float(theta["T_min"]); d_vec = np.asarray(ctx.get("d", np.zeros(len(ctx["T_out"]))), dtype=int)
 
             with st.spinner("Deterministic baseline..."):
@@ -1118,13 +1116,9 @@ def tab_reviewer():
                 o=sol.get("objective"); b=sol.get("best_bound")
                 if o in (None,0) or b is None: return None
                 return abs(o-b)/max(1.0, abs(o))*100.0
-
             def inwin(T_row):
-                if gw is None:
-                    return int(np.sum(np.asarray(T_row)[1:] < T_min - 1e-6))
-                seg = np.asarray(T_row)[gw[0]+1: gw[1]+1]
-                return int(np.sum(seg < T_min - 1e-6))
-
+                if gw is None: return int(np.sum(np.asarray(T_row)[1:] < T_min - 1e-6))
+                return int(np.sum(np.asarray(T_row)[gw[0]+1: gw[1]+1] < T_min - 1e-6))
             def row(label, sol_eval, sol_orig, t_solve):
                 if not sol_eval.get("feasible") or not sol_orig.get("feasible"):
                     return {"Method":label,"Objective":"infeasible","In-win CV (min)":"---",
@@ -1153,12 +1147,12 @@ def tab_reviewer():
         st.error("The run raised an exception:"); st.code(st.session_state["rev_err"])
     R=st.session_state.get("rev")
     if R:
-        st.subheader("Table III (no MPC) -- comfort measured in-window")
+        st.subheader("Table III (no MPC) -- comfort in-window")
         st.dataframe(R["t3"], hide_index=True, use_container_width=True)
         st.metric("VSS", f"{R['vss']:.0f}" if R["vss"] is not None else "n/a")
         st.download_button("Download table3_no_mpc.csv", R["t3"].to_csv(index=False).encode(),
                            file_name="table3_no_mpc.csv", key="dl_t3")
-        st.subheader("Alpha-ablation -- comfort measured in-window")
+        st.subheader("Alpha-ablation -- comfort in-window")
         st.dataframe(R["ab"], hide_index=True, use_container_width=True)
         if R["delta"] is not None:
             st.metric("Cost saved by allowing bounded risk (without - with)", f"{R['delta']:.0f}")
