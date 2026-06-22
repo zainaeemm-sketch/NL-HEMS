@@ -939,7 +939,7 @@ varies the **chance level alpha** and **scenario count N_s**.
         prog.empty()
 
         df = pd.DataFrame(rows)
-       st.subheader("Sweep results")
+        st.subheader("Sweep results")
         st.dataframe(df, hide_index=True, use_container_width=True)
         st.download_button("Download sweep_results.csv",
                            df.to_csv(index=False).encode("utf-8"),
