@@ -114,7 +114,8 @@ with st.sidebar:
                     "5. Real Milan Data",
                     "6. Sensitivity Analysis",
                     "7. alpha(z) Mapping",
-                    "8. Reviewer Study"],
+                    "8. Reviewer Study",
+                    "9. Converged Sweep"],
                    index=0)
 
     st.divider()
@@ -1165,6 +1166,134 @@ def tab_reviewer():
 # =====================================================================
 # Router
 # =====================================================================
+def tab_converged_sweep():
+    import traceback, io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    st.title("Converged sensitivity sweep (warm-started)")
+    st.markdown("Warm-started, stress-context sweep so the three panels "
+                "converge. Grid: alpha in {0, 0.2}, N_s in {4, 8, 16, 32}.")
+
+    utterance = st.text_input("Utterance",
+        value="Keep us warm for guests, but help during peak hours.", key="cs_utt")
+    c1, c2 = st.columns(2)
+    with c1:
+        budget = st.slider("Solver budget per solve (s)", 15, 90, 30, 5, key="cs_b")
+        cold   = st.slider("Base cold shift (deg C)", 0, 12, 4, key="cs_cold")
+        spread = st.slider("Scenario spread sigma_Tout", 1.0, 6.0, 2.5, 0.5, key="cs_sp")
+    with c2:
+        dip  = st.slider("Window cold dip (deg C)", 0, 12, 6, key="cs_dip")
+        hvac = st.slider("HVAC kappa (kW)", 0.8, 3.0, 2.5, 0.1, key="cs_hv")
+
+    ALPHAS = [0.0, 0.2]
+    NLIST  = [4, 8, 16, 32]
+    NAVY = "#1F3A93"; RED = "#C0182B"
+
+    if st.button("Run converged sweep", type="primary", key="cs_go"):
+        try:
+            ctx = dict(_real_context(horizon, peak_kwp))
+            intent = SimulatedLLMParser().parse(utterance).to_dict()
+            theta  = triangular_map(intent)
+            gw = None
+            if intent.get("guest_flag") == 1:
+                gw = (int(intent.get("window_start") or 19),
+                      int(intent.get("window_end")   or 23))
+            Tout = np.asarray(ctx["T_out"], dtype=float) - float(cold)
+            if gw is not None:
+                for t in range(gw[0], min(gw[1] + 1, len(Tout))):
+                    Tout[t] -= float(dip)
+            ctx["T_out"] = Tout.tolist()
+            bld   = {**_building(E_bat, P_bat), "kappa": float(hvac)}
+            T_min = float(theta["T_min"])
+
+            def inwin(T_row):
+                if gw is None:
+                    return int(np.sum(np.asarray(T_row)[1:] < T_min - 1e-6))
+                return int(np.sum(np.asarray(T_row)[gw[0] + 1: gw[1] + 1] < T_min - 1e-6))
+
+            def gap(sol):
+                o = sol.get("objective"); b = sol.get("best_bound")
+                if o in (None, 0) or b is None:
+                    return None
+                return abs(o - b) / max(1.0, abs(o)) * 100.0
+
+            rows = []; prog = st.progress(0.0); total = len(NLIST) * len(ALPHAS); k = 0
+            for N in NLIST:
+                scens = generate_scenarios(ctx, N_s=N, sigma_Tout=spread, seed=42)
+                sol_d = solve_deterministic(theta, ctx, guest_window=gw, building=bld)
+                prev_y, prev_u = sol_d.get("y"), sol_d.get("ubat")
+                for a in ALPHAS:
+                    t0 = time.time()
+                    sol = solve_stochastic(theta, scens, alpha=a, guest_window=gw,
+                                           building=bld, time_limit_s=budget,
+                                           hint_y=prev_y, hint_ubat=prev_u)
+                    dt = time.time() - t0
+                    if sol.get("feasible"):
+                        prev_y, prev_u = sol.get("y"), sol.get("ubat")
+                        T = np.asarray(sol["T_in"])
+                        vio = [inwin(T[w]) for w in range(T.shape[0])]
+                        rows.append({"alpha": a, "N_s": N, "objective": sol["objective"],
+                                     "solve_s": dt, "gap_pct": gap(sol),
+                                     "mean_cv_min": float(np.mean(vio)) * 60.0,
+                                     "cvar_min": cvar_alpha(vio, 0.2) * 60.0})
+                    else:
+                        rows.append({"alpha": a, "N_s": N, "objective": None, "solve_s": dt,
+                                     "gap_pct": None, "mean_cv_min": None, "cvar_min": None})
+                    k += 1; prog.progress(k / total)
+            prog.empty()
+            st.session_state["cs_df"] = pd.DataFrame(rows)
+            st.session_state.pop("cs_err", None)
+        except Exception:
+            st.session_state["cs_err"] = traceback.format_exc()
+
+    if st.session_state.get("cs_err"):
+        st.error("Run failed:"); st.code(st.session_state["cs_err"])
+    df = st.session_state.get("cs_df")
+    if df is not None and not df.empty:
+        st.subheader("Sweep results")
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.download_button("Download sweep_converged.csv",
+                           df.to_csv(index=False).encode("utf-8"),
+                           file_name="sweep_converged.csv", mime="text/csv", key="cs_dl")
+
+        d = df.dropna(subset=["objective"])
+
+        def figdl(fig, name, key):
+            st.pyplot(fig)
+            buf = io.BytesIO(); fig.savefig(buf, format="pdf", bbox_inches="tight"); buf.seek(0)
+            st.download_button("Download " + name, buf, file_name=name,
+                               mime="application/pdf", key=key)
+            plt.close(fig)
+
+        figA, axA = plt.subplots(figsize=(6.4, 4.2))
+        for a, c in [(0.0, NAVY), (0.2, RED)]:
+            s = d[d.alpha == a].sort_values("N_s")
+            axA.plot(s.N_s, s.objective / 1e9, "-o", color=c, lw=2.4, ms=8, label="alpha=" + str(a))
+        axA.set_xlabel("Scenario count N_s", fontweight="bold")
+        axA.set_ylabel("Objective (x10^9)", fontweight="bold")
+        axA.set_xticks(NLIST); axA.legend(); axA.grid(alpha=0.3); figA.tight_layout()
+        figdl(figA, "fig4a_objective.pdf", "cs_fa")
+
+        figB, axB = plt.subplots(figsize=(6.4, 4.2))
+        for a, c in [(0.0, NAVY), (0.2, RED)]:
+            s = d[d.alpha == a].sort_values("N_s")
+            axB.plot(s.N_s, s.mean_cv_min, "-o", color=c, lw=2.4, ms=8, label="alpha=" + str(a))
+        axB.set_xlabel("Scenario count N_s", fontweight="bold")
+        axB.set_ylabel("In-window violation (min)", fontweight="bold")
+        axB.set_xticks(NLIST); axB.legend(); axB.grid(alpha=0.3); figB.tight_layout()
+        figdl(figB, "fig4b_violation.pdf", "cs_fb")
+
+        figC, axC = plt.subplots(figsize=(6.4, 4.2))
+        for a, c in [(0.0, NAVY), (0.2, RED)]:
+            s = d[d.alpha == a].sort_values("N_s")
+            axC.plot(s.N_s, s.solve_s, "-o", color=c, lw=2.4, ms=8, label="alpha=" + str(a))
+        axC.set_xlabel("Scenario count N_s", fontweight="bold")
+        axC.set_ylabel("Solve time (s)", fontweight="bold")
+        axC.set_xticks(NLIST); axC.legend(); axC.grid(alpha=0.3); figC.tight_layout()
+        figdl(figC, "fig4c_solvetime.pdf", "cs_fc")
+
+
 ROUTES = {
     "1. Overview":              tab_overview,
     "2. Single Command":        tab_single,
@@ -1174,5 +1303,6 @@ ROUTES = {
     "6. Sensitivity Analysis":  tab_sensitivity,
     "7. alpha(z) Mapping":      tab_novelty,
     "8. Reviewer Study":        tab_reviewer,
+    "9. Converged Sweep":       tab_converged_sweep,
 }
 ROUTES[tab]()
