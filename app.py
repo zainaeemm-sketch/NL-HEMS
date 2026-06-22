@@ -887,8 +887,8 @@ varies the **chance level alpha** and **scenario count N_s**.
     alphas = st.multiselect("alpha values",
                             [0.0, 0.05, 0.1, 0.2, 0.3, 0.5],
                             default=[0.0, 0.1, 0.2, 0.3])
-    N_list = st.multiselect("N_s values", [4, 6, 8, 12, 16, 24],
-                            default=[4, 8, 16])
+     N_list = st.multiselect("N_s values", [4, 6, 8, 12, 16, 24, 32],
+                            default=[4, 8, 16, 24, 32])
     tmin_override = st.slider("T_min for the sweep (°C)",
                               min_value=20.0, max_value=23.0,
                               value=22.0, step=0.5,
