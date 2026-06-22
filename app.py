@@ -887,7 +887,7 @@ varies the **chance level alpha** and **scenario count N_s**.
     alphas = st.multiselect("alpha values",
                             [0.0, 0.05, 0.1, 0.2, 0.3, 0.5],
                             default=[0.0, 0.1, 0.2, 0.3])
-     N_list = st.multiselect("N_s values", [4, 6, 8, 12, 16, 24, 32],
+    N_list = st.multiselect("N_s values", [4, 6, 8, 12, 16, 24, 32],
                             default=[4, 8, 16, 24, 32])
     tmin_override = st.slider("T_min for the sweep (°C)",
                               min_value=20.0, max_value=23.0,
@@ -896,7 +896,7 @@ varies the **chance level alpha** and **scenario count N_s**.
                                    "constraint actually bind, so the "
                                    "violation plot becomes informative. "
                                    "Reviewers expect a non-trivial "
-                                   "violation–vs–\u03b1 curve.")
+                                   "violation–vs–α curve.")
 
     if st.button("Run sweep", type="primary"):
         ctx = _real_context(horizon, peak_kwp)
