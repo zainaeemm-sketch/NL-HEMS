@@ -1052,6 +1052,13 @@ show how a single sentence change reshapes the schedule.
                     color_discrete_sequence=PRINT_PALETTE)
             style_for_print(fig)
             st.plotly_chart(fig, use_container_width=True)
+            st.download_button(
+                "Download alpha_intensity.csv",
+                dft.to_csv(index=False).encode(),
+                file_name="alpha_intensity.csv",
+                mime="text/csv",
+                key="dl_alpha_intensity",
+            )
 
 
 
