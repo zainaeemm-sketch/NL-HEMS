@@ -1018,11 +1018,11 @@ show how a single sentence change reshapes the schedule.
                 ws = intent.get("window_start") or 19
                 we = intent.get("window_end") or 23
                 gw = (int(ws), int(we))
-            scens = generate_scenarios(ctx, N_s=6, seed=42)
+            scens = generate_scenarios(ctx, N_s=32, seed=42)
             sol = solve_stochastic(theta, scens, alpha=alpha,
                                    guest_window=gw,
                                    building=_building(E_bat, P_bat),
-                                   time_limit_s=15)
+                                   time_limit_s=30)
             rows.append({
                 "utterance": u,
                 "comfort_intensity": intent.get("comfort_intensity"),
@@ -1037,8 +1037,8 @@ show how a single sentence change reshapes the schedule.
             })
             if sol.get("feasible"):
                 T = sol["T_in"].mean(axis=0)
-                traj.extend([{"hour": t, "T_in": T[t],
-                              "utterance": u[:40] + "..."} for t in range(len(T))])
+                traj.extend([{"hour": t, "T_in": T[t], "alpha": round(alpha, 3),
+                              "utterance": u} for t in range(len(T))])
 
         st.dataframe(pd.DataFrame(rows), hide_index=True,
                      use_container_width=True)
