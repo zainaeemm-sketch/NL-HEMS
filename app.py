@@ -760,11 +760,10 @@ decisions from the deterministic point-forecast problem.
         for label, sol in [("Stochastic mean", sol_s),
                            ("Deterministic", sol_d),
                            ("MPC", sol_m)]:
-            if not sol.get("feasible"):
-                continue
-            T = sol["T_in"].mean(axis=0)
-            rows.extend([{"hour": t, "T_in (C)": T[t], "method": label}
-                         for t in range(len(T))])
+            if sol.get("feasible"):
+                T = sol["T_in"].mean(axis=0)
+                traj.extend([{"hour": t, "T_in": T[t], "alpha": round(alpha, 3),
+                              "utterance": u} for t in range(len(T))])
         if rows:
             dft = pd.DataFrame(rows)
             fig = px.line(dft, x="hour", y="T_in (C)", color="method",
