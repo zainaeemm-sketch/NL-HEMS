@@ -1368,6 +1368,8 @@ def tab_benefit_study():
 
     if st.button("Run " + which, type="primary", key="b2_go"):
         try:
+            _prev = st.session_state.get("b2_rows", [])
+            st.session_state["b2_rows"] = [r for r in _prev if r["utterance"] != which]
             intent = SimulatedLLMParser().parse(utext).to_dict()
             theta = dict(triangular_map(intent))
             theta["lambda_comf"] = float(theta["lambda_comf"]) * float(wscale)
@@ -1428,6 +1430,8 @@ def tab_benefit_study():
                 dt = time.time() - t0
                 row = {"utterance": which, "dip": chosen, "controller": cname,
                        "N_s": int(N_s), "w_scale": float(wscale),
+                       "budget_req_s": int(budget),
+                       "run_ts": time.strftime("%H:%M:%S"),
                        "lambda_min_eff": float(theta["lambda_min"]),
                        "lambda_cost": float(theta.get("lambda_cost", 0.0)),
                        "alpha": a, "K": int(np.floor(a * N_s)),
@@ -1470,6 +1474,12 @@ def tab_benefit_study():
     if rows:
         df = pd.DataFrame(rows)
         st.subheader("Results (all utterances run so far)")
+        if "budget_req_s" in df.columns and "solve_s" in df.columns:
+            _bad = df[(df.solve_s < df.budget_req_s * 0.8)]
+            if not _bad.empty:
+                st.warning("Some rows have solve_s well below the requested "
+                           "budget - either the solver proved optimality early, "
+                           "or these rows are from an earlier run. Check run_ts.")
         st.dataframe(df, hide_index=True, use_container_width=True)
         st.download_button("Download benefit_study_v2.csv",
                            df.to_csv(index=False).encode("utf-8"),
