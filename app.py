@@ -1336,7 +1336,7 @@ def tab_benefit_study():
     c1, c2, c3 = st.columns(3)
     with c1:
         cal_budget = st.slider("Stage-1 budget per probe (s)", 5, 30, 10, 5, key="b2_cb")
-        budget = st.slider("Stage-2 budget per solve (s)", 60, 300, 180, 30, key="b2_b")
+        budget = st.slider("Stage-2 budget per solve (s)", 60, 900, 180, 60, key="b2_b")
     with c2:
         dip_max = st.slider("Max dip to probe (deg C)", 4, 16, 12, key="b2_dm")
         cold = st.slider("Base cold shift (deg C)", 0, 12, 4, key="b2_c")
