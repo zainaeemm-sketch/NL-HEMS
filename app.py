@@ -115,7 +115,8 @@ with st.sidebar:
                     "6. Sensitivity Analysis",
                     "7. alpha(z) Mapping",
                     "8. Reviewer Study",
-                    "9. Converged Sweep"],
+                    "9. Converged Sweep",
+                    "10. Benefit Study"],
                    index=0)
 
     st.divider()
@@ -760,10 +761,11 @@ decisions from the deterministic point-forecast problem.
         for label, sol in [("Stochastic mean", sol_s),
                            ("Deterministic", sol_d),
                            ("MPC", sol_m)]:
-            if sol.get("feasible"):
-                T = sol["T_in"].mean(axis=0)
-                traj.extend([{"hour": t, "T_in": T[t], "alpha": round(alpha, 3),
-                              "utterance": u} for t in range(len(T))])
+            if not sol.get("feasible"):
+                continue
+            T = sol["T_in"].mean(axis=0)
+            rows.extend([{"hour": t, "T_in (C)": T[t], "method": label}
+                         for t in range(len(T))])
         if rows:
             dft = pd.DataFrame(rows)
             fig = px.line(dft, x="hour", y="T_in (C)", color="method",
@@ -1018,11 +1020,11 @@ show how a single sentence change reshapes the schedule.
                 ws = intent.get("window_start") or 19
                 we = intent.get("window_end") or 23
                 gw = (int(ws), int(we))
-            scens = generate_scenarios(ctx, N_s=32, seed=42)
+            scens = generate_scenarios(ctx, N_s=6, seed=42)
             sol = solve_stochastic(theta, scens, alpha=alpha,
                                    guest_window=gw,
                                    building=_building(E_bat, P_bat),
-                                   time_limit_s=30)
+                                   time_limit_s=15)
             rows.append({
                 "utterance": u,
                 "comfort_intensity": intent.get("comfort_intensity"),
@@ -1037,8 +1039,8 @@ show how a single sentence change reshapes the schedule.
             })
             if sol.get("feasible"):
                 T = sol["T_in"].mean(axis=0)
-                traj.extend([{"hour": t, "T_in": T[t], "alpha": round(alpha, 3),
-                              "utterance": u} for t in range(len(T))])
+                traj.extend([{"hour": t, "T_in": T[t],
+                              "utterance": u[:40] + "..."} for t in range(len(T))])
 
         st.dataframe(pd.DataFrame(rows), hide_index=True,
                      use_container_width=True)
@@ -1052,13 +1054,6 @@ show how a single sentence change reshapes the schedule.
                     color_discrete_sequence=PRINT_PALETTE)
             style_for_print(fig)
             st.plotly_chart(fig, use_container_width=True)
-            st.download_button(
-                "Download alpha_intensity.csv",
-                dft.to_csv(index=False).encode(),
-                file_name="alpha_intensity.csv",
-                mime="text/csv",
-                key="dl_alpha_intensity",
-            )
 
 
 
@@ -1300,6 +1295,126 @@ def tab_converged_sweep():
         figdl(figC, "fig4c_solvetime.pdf", "cs_fc")
 
 
+def tab_benefit_study():
+    import traceback
+    st.title("Benefit study: alpha(z) vs fixed and simplified rules")
+    st.markdown("Controlled comparison for the paper's Table `tab:alpha-benefit`. "
+                "Each utterance is scheduled by four controllers on the same "
+                "training scenarios (warm-start chain), then every committed "
+                "first-stage plan is evaluated **out-of-sample** on an "
+                "independent test set with the chance constraint switched off.")
+
+    st.subheader("Utterances")
+    u_med = st.text_input("Medical", "My elderly mother is staying with us tonight, keep it warm.", key="bs_u1")
+    u_gst = st.text_input("Guest", "Guests are coming over this evening, keep it warm.", key="bs_u2")
+    u_hdg = st.text_input("Hedged / cost-aware", "Try to keep it warm this evening if it isn't too expensive.", key="bs_u3")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        budget = st.slider("Solver budget per solve (s)", 15, 120, 30, 5, key="bs_b")
+        ebudget = st.slider("Evaluation budget per plan (s)", 5, 60, 20, 5, key="bs_eb")
+        N_s = st.select_slider("Training scenarios N_s", [8, 16, 32], 32, key="bs_ns")
+    with c2:
+        cold = st.slider("Base cold shift (deg C)", 0, 12, 4, key="bs_cold")
+        dip = st.slider("Window cold dip (deg C)", 0, 12, 8, key="bs_dip")
+        spread = st.slider("Scenario spread sigma_Tout", 1.0, 6.0, 4.0, 0.5, key="bs_sp")
+    with c3:
+        hvac = st.slider("HVAC kappa (kW)", 0.8, 3.0, 2.2, 0.1, key="bs_hv")
+        N_test = st.select_slider("Test scenarios N_test", [32, 64, 128], 64, key="bs_nt")
+        seed_test = st.number_input("Test seed", value=7, step=1, key="bs_seed")
+
+    gw = (19, 23)
+
+    if st.button("Run benefit study", type="primary", key="bs_go"):
+        try:
+            ctx = dict(_real_context(horizon, peak_kwp))
+            Tout = np.asarray(ctx["T_out"], dtype=float) - float(cold)
+            for t in range(gw[0], min(gw[1] + 1, len(Tout))):
+                Tout[t] -= float(dip)
+            ctx["T_out"] = Tout.tolist()
+            bld = {**_building(E_bat, P_bat), "kappa": float(hvac)}
+            train = generate_scenarios(ctx, N_s=int(N_s), sigma_Tout=spread, seed=42)
+            test = generate_scenarios(ctx, N_s=int(N_test), sigma_Tout=spread, seed=int(seed_test))
+
+            def inwin_counts(T):
+                T = np.asarray(T)
+                return [int(np.sum(T[w][gw[0] + 1: gw[1] + 1] < T_min - 1e-6))
+                        for w in range(T.shape[0])]
+
+            def gap(sol):
+                o = sol.get("objective"); b = sol.get("best_bound")
+                if o in (None, 0) or b is None:
+                    return None
+                return abs(o - b) / max(1.0, abs(o)) * 100.0
+
+            rows = []
+            utts = [("Medical", u_med), ("Guest", u_gst), ("Hedged", u_hdg)]
+            prog = st.progress(0.0); total = len(utts) * 4; k = 0
+            for uname, utext in utts:
+                intent = SimulatedLLMParser().parse(utext).to_dict()
+                theta = triangular_map(intent)
+                T_min = float(theta["T_min"])
+                a_z = float(alpha_from_intent(intent))
+                hedged = float(intent.get("comfort_intensity", 1.0)) <= 0.5
+                medical = int(intent.get("medical_context", 0)) == 1
+                two_level = 0.0 if medical else (0.3 if hedged else 0.0)
+                ctrls = [("fixed alpha=0", 0.0), ("fixed alpha=0.2", 0.2),
+                         ("two-level rule", two_level), ("alpha(z)", a_z)]
+                ctrls_sorted = sorted(ctrls, key=lambda c: c[1])
+
+                det = solve_deterministic(theta, ctx, guest_window=gw, building=bld)
+                prev_y, prev_u = det.get("y"), det.get("ubat")
+                for cname, a in ctrls_sorted:
+                    t0 = time.time()
+                    sol = solve_stochastic(theta, train, alpha=a, guest_window=gw,
+                                           building=bld, time_limit_s=budget,
+                                           hint_y=prev_y, hint_ubat=prev_u)
+                    dt = time.time() - t0
+                    row = {"utterance": uname, "controller": cname, "alpha": a,
+                           "obj_in": None, "gap_pct": None, "solve_s": dt,
+                           "viol_in_mean_min": None, "cost_oos": None,
+                           "viol_oos_mean_min": None, "cvar_oos_min": None,
+                           "rfr_oos_pct": None, "feasible": bool(sol.get("feasible"))}
+                    if sol.get("feasible"):
+                        prev_y, prev_u = sol.get("y"), sol.get("ubat")
+                        vin = inwin_counts(sol["T_in"])
+                        row.update({"obj_in": sol["objective"], "gap_pct": gap(sol),
+                                    "viol_in_mean_min": float(np.mean(vin)) * 60.0})
+                        ev = solve_stochastic(theta, test, alpha=1.0, guest_window=gw,
+                                              building=bld, time_limit_s=ebudget,
+                                              fix_y=sol["y"], fix_ubat=sol["ubat"])
+                        if ev.get("feasible"):
+                            vo = inwin_counts(ev["T_in"])
+                            row.update({"cost_oos": ev["objective"],
+                                        "viol_oos_mean_min": float(np.mean(vo)) * 60.0,
+                                        "cvar_oos_min": cvar_alpha(vo, 0.2) * 60.0,
+                                        "rfr_oos_pct": float(np.mean([v == 0 for v in vo])) * 100.0})
+                    rows.append(row)
+                    k += 1; prog.progress(k / total)
+            prog.empty()
+            st.session_state["bs_df"] = pd.DataFrame(rows)
+            st.session_state.pop("bs_err", None)
+        except Exception:
+            st.session_state["bs_err"] = traceback.format_exc()
+
+    if st.session_state.get("bs_err"):
+        st.error("Run failed:"); st.code(st.session_state["bs_err"])
+    df = st.session_state.get("bs_df")
+    if df is not None and not df.empty:
+        st.subheader("Results")
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.download_button("Download benefit_study.csv",
+                           df.to_csv(index=False).encode("utf-8"),
+                           file_name="benefit_study.csv", mime="text/csv", key="bs_dl")
+        spent = df[(df.controller == "alpha(z)") & (df.viol_in_mean_min.fillna(0) > 0)]
+        if spent.empty:
+            st.warning("alpha(z) did not spend its allowance on any utterance "
+                       "(zero in-sample violations). Increase the window dip or "
+                       "lower HVAC kappa and rerun, so the comparison is informative.")
+        else:
+            st.success("Allowance is exercised for: " + ", ".join(spent.utterance.tolist()))
+
+
 ROUTES = {
     "1. Overview":              tab_overview,
     "2. Single Command":        tab_single,
@@ -1310,5 +1425,6 @@ ROUTES = {
     "7. alpha(z) Mapping":      tab_novelty,
     "8. Reviewer Study":        tab_reviewer,
     "9. Converged Sweep":       tab_converged_sweep,
+    "10. Benefit Study":        tab_benefit_study,
 }
 ROUTES[tab]()
