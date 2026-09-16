@@ -1297,122 +1297,174 @@ def tab_converged_sweep():
 
 def tab_benefit_study():
     import traceback
-    st.title("Benefit study: alpha(z) vs fixed and simplified rules")
-    st.markdown("Controlled comparison for the paper's Table `tab:alpha-benefit`. "
-                "Each utterance is scheduled by four controllers on the same "
-                "training scenarios (warm-start chain), then every committed "
-                "first-stage plan is evaluated **out-of-sample** on an "
-                "independent test set with the chance constraint switched off.")
+    st.title("Benefit study v2 (per-utterance calibration)")
+    st.markdown(
+        "Two stages. **Stage 1** finds, for each utterance, the harshest cold "
+        "dip at which the hard bound ($\\alpha=0$) is still feasible - the "
+        "regime where the chance constraint can actually bind. **Stage 2** runs "
+        "the four controllers there with a long budget, records the solver's "
+        "best bound, and tests whether any cost difference is larger than the "
+        "optimality gap. Run one utterance at a time; results accumulate.")
 
-    st.subheader("Utterances")
-    u_med = st.text_input("Medical", "My elderly mother is staying with us tonight, keep it warm.", key="bs_u1")
-    u_gst = st.text_input("Guest", "Guests are coming over this evening, keep it warm.", key="bs_u2")
-    u_hdg = st.text_input("Hedged / cost-aware", "Try to keep it warm this evening if it isn't too expensive.", key="bs_u3")
+    UTTS = {
+        "Medical": "My elderly mother is staying with us tonight, keep it warm.",
+        "Guest":   "Guests are coming over this evening, keep it warm.",
+        "Hedged":  "Try to keep it warm this evening if it isn't too expensive.",
+    }
+    which = st.selectbox("Utterance to run", list(UTTS.keys()), key="b2_w")
+    utext = st.text_input("Text", UTTS[which], key="b2_t")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        budget = st.slider("Solver budget per solve (s)", 15, 120, 30, 5, key="bs_b")
-        ebudget = st.slider("Evaluation budget per plan (s)", 5, 60, 20, 5, key="bs_eb")
-        N_s = st.select_slider("Training scenarios N_s", [8, 16, 32], 32, key="bs_ns")
+        cal_budget = st.slider("Stage-1 budget per probe (s)", 5, 30, 10, 5, key="b2_cb")
+        budget = st.slider("Stage-2 budget per solve (s)", 60, 300, 180, 30, key="b2_b")
     with c2:
-        cold = st.slider("Base cold shift (deg C)", 0, 12, 4, key="bs_cold")
-        dip = st.slider("Window cold dip (deg C)", 0, 12, 8, key="bs_dip")
-        spread = st.slider("Scenario spread sigma_Tout", 1.0, 6.0, 4.0, 0.5, key="bs_sp")
+        dip_max = st.slider("Max dip to probe (deg C)", 4, 16, 12, key="b2_dm")
+        cold = st.slider("Base cold shift (deg C)", 0, 12, 4, key="b2_c")
     with c3:
-        hvac = st.slider("HVAC kappa (kW)", 0.8, 3.0, 2.2, 0.1, key="bs_hv")
-        N_test = st.select_slider("Test scenarios N_test", [32, 64, 128], 64, key="bs_nt")
-        seed_test = st.number_input("Test seed", value=7, step=1, key="bs_seed")
-
+        spread = st.slider("Scenario spread sigma_Tout", 1.0, 6.0, 4.0, 0.5, key="b2_s")
+        hvac = st.slider("HVAC kappa (kW)", 0.8, 3.0, 2.2, 0.1, key="b2_h")
+    N_s, N_test, seed_test = 32, 64, 7
     gw = (19, 23)
 
-    if st.button("Run benefit study", type="primary", key="bs_go"):
-        try:
-            ctx = dict(_real_context(horizon, peak_kwp))
-            Tout = np.asarray(ctx["T_out"], dtype=float) - float(cold)
-            for t in range(gw[0], min(gw[1] + 1, len(Tout))):
-                Tout[t] -= float(dip)
-            ctx["T_out"] = Tout.tolist()
-            bld = {**_building(E_bat, P_bat), "kappa": float(hvac)}
-            train = generate_scenarios(ctx, N_s=int(N_s), sigma_Tout=spread, seed=42)
-            test = generate_scenarios(ctx, N_s=int(N_test), sigma_Tout=spread, seed=int(seed_test))
+    def build_ctx(dip):
+        ctx = dict(_real_context(horizon, peak_kwp))
+        T = np.asarray(ctx["T_out"], dtype=float) - float(cold)
+        for t in range(gw[0], min(gw[1] + 1, len(T))):
+            T[t] -= float(dip)
+        ctx["T_out"] = T.tolist()
+        return ctx
 
-            def inwin_counts(T):
-                T = np.asarray(T)
+    if st.button("Run " + which, type="primary", key="b2_go"):
+        try:
+            intent = SimulatedLLMParser().parse(utext).to_dict()
+            theta = triangular_map(intent)
+            T_min = float(theta["T_min"])
+            a_z = float(alpha_from_intent(intent))
+            medical = int(intent.get("medical_context", 0)) == 1
+            hedged = float(intent.get("comfort_intensity", 1.0)) <= 0.5
+            two_level = 0.0 if medical else (0.3 if hedged else 0.0)
+            bld = {**_building(E_bat, P_bat), "kappa": float(hvac)}
+
+            def inwin(T_rows):
+                T = np.asarray(T_rows)
                 return [int(np.sum(T[w][gw[0] + 1: gw[1] + 1] < T_min - 1e-6))
                         for w in range(T.shape[0])]
 
-            def gap(sol):
-                o = sol.get("objective"); b = sol.get("best_bound")
-                if o in (None, 0) or b is None:
-                    return None
-                return abs(o - b) / max(1.0, abs(o)) * 100.0
+            # ---- Stage 1: harshest dip at which alpha=0 is still feasible ----
+            st.write("**Stage 1** - probing for the binding regime...")
+            p1 = st.progress(0.0)
+            dips = list(range(int(dip_max), -1, -1))
+            chosen, probe_rows = None, []
+            for i, d in enumerate(dips):
+                ctxd = build_ctx(d)
+                sc = generate_scenarios(ctxd, N_s=N_s, sigma_Tout=spread, seed=42)
+                s0 = solve_stochastic(theta, sc, alpha=0.0, guest_window=gw,
+                                      building=bld, time_limit_s=cal_budget)
+                ok = bool(s0.get("feasible"))
+                probe_rows.append({"dip": d, "alpha0_feasible": ok})
+                p1.progress((i + 1) / len(dips))
+                if ok:
+                    chosen = d
+                    break
+            p1.empty()
+            if chosen is None:
+                st.error("alpha=0 is infeasible at every probed dip, including 0. "
+                         "Lower the base cold shift or raise HVAC kappa.")
+                st.session_state["b2_probe_" + which] = probe_rows
+                return
+            st.info("Calibrated dip for **" + which + "**: " + str(chosen) +
+                    " deg C (harshest dip with alpha=0 feasible).")
 
+            # ---- Stage 2: four controllers at the calibrated dip ----
+            ctxd = build_ctx(chosen)
+            train = generate_scenarios(ctxd, N_s=N_s, sigma_Tout=spread, seed=42)
+            test = generate_scenarios(ctxd, N_s=N_test, sigma_Tout=spread, seed=seed_test)
+            ctrls = sorted([("fixed alpha=0", 0.0), ("fixed alpha=0.2", 0.2),
+                            ("two-level rule", two_level), ("alpha(z)", a_z)],
+                           key=lambda c: c[1])
+            det = solve_deterministic(theta, ctxd, guest_window=gw, building=bld)
+            prev_y, prev_u = det.get("y"), det.get("ubat")
             rows = []
-            utts = [("Medical", u_med), ("Guest", u_gst), ("Hedged", u_hdg)]
-            prog = st.progress(0.0); total = len(utts) * 4; k = 0
-            for uname, utext in utts:
-                intent = SimulatedLLMParser().parse(utext).to_dict()
-                theta = triangular_map(intent)
-                T_min = float(theta["T_min"])
-                a_z = float(alpha_from_intent(intent))
-                hedged = float(intent.get("comfort_intensity", 1.0)) <= 0.5
-                medical = int(intent.get("medical_context", 0)) == 1
-                two_level = 0.0 if medical else (0.3 if hedged else 0.0)
-                ctrls = [("fixed alpha=0", 0.0), ("fixed alpha=0.2", 0.2),
-                         ("two-level rule", two_level), ("alpha(z)", a_z)]
-                ctrls_sorted = sorted(ctrls, key=lambda c: c[1])
-
-                det = solve_deterministic(theta, ctx, guest_window=gw, building=bld)
-                prev_y, prev_u = det.get("y"), det.get("ubat")
-                for cname, a in ctrls_sorted:
-                    t0 = time.time()
-                    sol = solve_stochastic(theta, train, alpha=a, guest_window=gw,
-                                           building=bld, time_limit_s=budget,
-                                           hint_y=prev_y, hint_ubat=prev_u)
-                    dt = time.time() - t0
-                    row = {"utterance": uname, "controller": cname, "alpha": a,
-                           "obj_in": None, "gap_pct": None, "solve_s": dt,
-                           "viol_in_mean_min": None, "cost_oos": None,
-                           "viol_oos_mean_min": None, "cvar_oos_min": None,
-                           "rfr_oos_pct": None, "feasible": bool(sol.get("feasible"))}
-                    if sol.get("feasible"):
-                        prev_y, prev_u = sol.get("y"), sol.get("ubat")
-                        vin = inwin_counts(sol["T_in"])
-                        row.update({"obj_in": sol["objective"], "gap_pct": gap(sol),
-                                    "viol_in_mean_min": float(np.mean(vin)) * 60.0})
-                        ev = solve_stochastic(theta, test, alpha=1.0, guest_window=gw,
-                                              building=bld, time_limit_s=ebudget,
-                                              fix_y=sol["y"], fix_ubat=sol["ubat"])
-                        if ev.get("feasible"):
-                            vo = inwin_counts(ev["T_in"])
-                            row.update({"cost_oos": ev["objective"],
-                                        "viol_oos_mean_min": float(np.mean(vo)) * 60.0,
-                                        "cvar_oos_min": cvar_alpha(vo, 0.2) * 60.0,
-                                        "rfr_oos_pct": float(np.mean([v == 0 for v in vo])) * 100.0})
-                    rows.append(row)
-                    k += 1; prog.progress(k / total)
-            prog.empty()
-            st.session_state["bs_df"] = pd.DataFrame(rows)
-            st.session_state.pop("bs_err", None)
+            p2 = st.progress(0.0)
+            for j, (cname, a) in enumerate(ctrls):
+                t0 = time.time()
+                sol = solve_stochastic(theta, train, alpha=a, guest_window=gw,
+                                       building=bld, time_limit_s=budget,
+                                       hint_y=prev_y, hint_ubat=prev_u)
+                dt = time.time() - t0
+                row = {"utterance": which, "dip": chosen, "controller": cname,
+                       "alpha": a, "K": int(np.floor(a * N_s)),
+                       "feasible": bool(sol.get("feasible")), "solve_s": dt,
+                       "obj_in": None, "best_bound": None, "gap_pct": None,
+                       "viol_in_mean_min": None, "cost_oos": None,
+                       "viol_oos_mean_min": None, "cvar_oos_min": None,
+                       "rfr_oos_pct": None}
+                if sol.get("feasible"):
+                    prev_y, prev_u = sol.get("y"), sol.get("ubat")
+                    o = sol["objective"]; b = sol.get("best_bound")
+                    vin = inwin(sol["T_in"])
+                    row.update({"obj_in": o, "best_bound": b,
+                                "gap_pct": (abs(o - b) / max(1.0, abs(o)) * 100.0)
+                                if b is not None else None,
+                                "viol_in_mean_min": float(np.mean(vin)) * 60.0})
+                    ev = solve_stochastic(theta, test, alpha=1.0, guest_window=gw,
+                                          building=bld, time_limit_s=20,
+                                          fix_y=sol["y"], fix_ubat=sol["ubat"])
+                    if ev.get("feasible"):
+                        vo = inwin(ev["T_in"])
+                        row.update({"cost_oos": ev["objective"],
+                                    "viol_oos_mean_min": float(np.mean(vo)) * 60.0,
+                                    "cvar_oos_min": cvar_alpha(vo, 0.2) * 60.0,
+                                    "rfr_oos_pct": float(np.mean([v == 0 for v in vo])) * 100.0})
+                rows.append(row)
+                p2.progress((j + 1) / len(ctrls))
+            p2.empty()
+            allr = st.session_state.get("b2_rows", [])
+            allr = [r for r in allr if r["utterance"] != which] + rows
+            st.session_state["b2_rows"] = allr
+            st.session_state.pop("b2_err", None)
         except Exception:
-            st.session_state["bs_err"] = traceback.format_exc()
+            st.session_state["b2_err"] = traceback.format_exc()
 
-    if st.session_state.get("bs_err"):
-        st.error("Run failed:"); st.code(st.session_state["bs_err"])
-    df = st.session_state.get("bs_df")
-    if df is not None and not df.empty:
-        st.subheader("Results")
+    if st.session_state.get("b2_err"):
+        st.error("Run failed:"); st.code(st.session_state["b2_err"])
+
+    rows = st.session_state.get("b2_rows")
+    if rows:
+        df = pd.DataFrame(rows)
+        st.subheader("Results (all utterances run so far)")
         st.dataframe(df, hide_index=True, use_container_width=True)
-        st.download_button("Download benefit_study.csv",
+        st.download_button("Download benefit_study_v2.csv",
                            df.to_csv(index=False).encode("utf-8"),
-                           file_name="benefit_study.csv", mime="text/csv", key="bs_dl")
-        spent = df[(df.controller == "alpha(z)") & (df.viol_in_mean_min.fillna(0) > 0)]
-        if spent.empty:
-            st.warning("alpha(z) did not spend its allowance on any utterance "
-                       "(zero in-sample violations). Increase the window dip or "
-                       "lower HVAC kappa and rerun, so the comparison is informative.")
-        else:
-            st.success("Allowance is exercised for: " + ", ".join(spent.utterance.tolist()))
+                           file_name="benefit_study_v2.csv", mime="text/csv",
+                           key="b2_dl")
+
+        st.subheader("Attribution test")
+        st.caption("A cost difference counts only if the controller's objective "
+                   "is below the BEST BOUND of alpha=0, i.e. below anything "
+                   "alpha=0 could have achieved. Otherwise it is inside the "
+                   "solver gap and proves nothing.")
+        for u in df.utterance.unique():
+            sub = df[(df.utterance == u) & df.feasible]
+            base = sub[sub.controller == "fixed alpha=0"]
+            if base.empty or base.iloc[0]["best_bound"] is None:
+                st.write("**" + u + "**: no feasible alpha=0 baseline.")
+                continue
+            lb0 = float(base.iloc[0]["best_bound"])
+            spent = sub.viol_in_mean_min.fillna(0).max() > 0
+            lines = []
+            for _, r in sub.iterrows():
+                if r["controller"] == "fixed alpha=0" or r["obj_in"] is None:
+                    continue
+                ok = float(r["obj_in"]) < lb0
+                lines.append(("PASS" if ok else "not attributable") +
+                             " - " + str(r["controller"]) +
+                             ": obj=" + format(float(r["obj_in"]) / 1e9, ".3f") +
+                             "e9 vs alpha=0 bound " + format(lb0 / 1e9, ".3f") + "e9")
+            st.write("**" + u + "** - allowance spent: " + ("YES" if spent else "NO"))
+            for ln in lines:
+                st.write("- " + ln)
 
 
 ROUTES = {
