@@ -1312,7 +1312,22 @@ def tab_benefit_study():
         "Hedged":  "Try to keep it warm this evening if it isn't too expensive.",
     }
     which = st.selectbox("Utterance to run", list(UTTS.keys()), key="b2_w")
-    utext = st.text_input("Text", UTTS[which], key="b2_t")
+    utext = st.text_input("Text", UTTS[which], key="b2_t_" + which)
+
+    _iv = SimulatedLLMParser().parse(utext).to_dict()
+    _th = triangular_map(_iv)
+    _az = float(alpha_from_intent(_iv))
+    _med = int(_iv.get("medical_context", 0))
+    _gst = int(_iv.get("guest_flag", 0))
+    st.info("Parsed now -> alpha(z)=" + format(_az, ".3f")
+            + "  |  T_min=" + format(float(_th["T_min"]), ".1f") + " C"
+            + "  |  medical=" + str(_med) + "  guest=" + str(_gst)
+            + "  |  K=" + str(int(np.floor(_az * 32))) + " of 32 scenarios")
+    if which == "Guest" and _gst != 1:
+        st.error("This text does not parse as a guest utterance - check the box above.")
+    if which != "Medical" and _med == 1:
+        st.error("This text parses as MEDICAL but you selected " + which
+                 + " - the text box is showing the wrong utterance.")
 
     c1, c2, c3 = st.columns(3)
     with c1:
