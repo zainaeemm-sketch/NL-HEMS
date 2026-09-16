@@ -1322,7 +1322,10 @@ def tab_benefit_study():
     st.info("Parsed now -> alpha(z)=" + format(_az, ".3f")
             + "  |  T_min=" + format(float(_th["T_min"]), ".1f") + " C"
             + "  |  medical=" + str(_med) + "  guest=" + str(_gst)
-            + "  |  K=" + str(int(np.floor(_az * 32))) + " of 32 scenarios")
+            + "  |  K=" + str(int(np.floor(_az * 32))) + " of 32 scenarios"
+            + "  |  lambda_min=" + format(float(_th["lambda_min"]), ".1f")
+            + " vs lambda_cost=" + format(float(_th.get("lambda_cost", 0.0)), ".1f")
+            + " (before scaling)")
     if which == "Guest" and _gst != 1:
         st.error("This text does not parse as a guest utterance - check the box above.")
     if which != "Medical" and _med == 1:
@@ -1339,6 +1342,13 @@ def tab_benefit_study():
     with c3:
         spread = st.slider("Scenario spread sigma_Tout", 1.0, 6.0, 4.0, 0.5, key="b2_s")
         hvac = st.slider("HVAC kappa (kW)", 0.8, 3.0, 2.2, 0.1, key="b2_h")
+    wscale = st.select_slider(
+        "Comfort-penalty scale (multiplies lambda_comf and lambda_min)",
+        options=[1.0, 0.5, 0.2, 0.1, 0.05, 0.0], value=1.0, key="b2_ws",
+        help="At 1.0 the objective penalizes comfort violations 6-15x more "
+             "than the cost they save, so the chance constraint never binds. "
+             "Lower values make the chance constraint the primary comfort "
+             "mechanism. Use 0.1 for the diagnostic test.")
     N_s, N_test, seed_test = 32, 64, 7
     gw = (19, 23)
 
@@ -1353,7 +1363,9 @@ def tab_benefit_study():
     if st.button("Run " + which, type="primary", key="b2_go"):
         try:
             intent = SimulatedLLMParser().parse(utext).to_dict()
-            theta = triangular_map(intent)
+            theta = dict(triangular_map(intent))
+            theta["lambda_comf"] = float(theta["lambda_comf"]) * float(wscale)
+            theta["lambda_min"] = float(theta["lambda_min"]) * float(wscale)
             T_min = float(theta["T_min"])
             a_z = float(alpha_from_intent(intent))
             medical = int(intent.get("medical_context", 0)) == 1
@@ -1409,6 +1421,9 @@ def tab_benefit_study():
                                        hint_y=prev_y, hint_ubat=prev_u)
                 dt = time.time() - t0
                 row = {"utterance": which, "dip": chosen, "controller": cname,
+                       "w_scale": float(wscale),
+                       "lambda_min_eff": float(theta["lambda_min"]),
+                       "lambda_cost": float(theta.get("lambda_cost", 0.0)),
                        "alpha": a, "K": int(np.floor(a * N_s)),
                        "feasible": bool(sol.get("feasible")), "solve_s": dt,
                        "obj_in": None, "best_bound": None, "gap_pct": None,
