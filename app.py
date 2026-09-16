@@ -1322,7 +1322,8 @@ def tab_benefit_study():
     st.info("Parsed now -> alpha(z)=" + format(_az, ".3f")
             + "  |  T_min=" + format(float(_th["T_min"]), ".1f") + " C"
             + "  |  medical=" + str(_med) + "  guest=" + str(_gst)
-            + "  |  K=" + str(int(np.floor(_az * 32))) + " of 32 scenarios"
+            + "  |  K(32)=" + str(int(np.floor(_az * 32)))
+            + " K(16)=" + str(int(np.floor(_az * 16)))
             + "  |  lambda_min=" + format(float(_th["lambda_min"]), ".1f")
             + " vs lambda_cost=" + format(float(_th.get("lambda_cost", 0.0)), ".1f")
             + " (before scaling)")
@@ -1349,7 +1350,12 @@ def tab_benefit_study():
              "than the cost they save, so the chance constraint never binds. "
              "Lower values make the chance constraint the primary comfort "
              "mechanism. Use 0.1 for the diagnostic test.")
-    N_s, N_test, seed_test = 32, 64, 7
+    N_s = st.select_slider("Training scenarios N_s", options=[8, 16, 24, 32],
+                           value=32, key="b2_ns",
+                           help="Smaller N_s makes the cardinality constraint "
+                                "tractable, so CP-SAT can close the gap and the "
+                                "comparison becomes certifiable.")
+    N_test, seed_test = 64, 7
     gw = (19, 23)
 
     def build_ctx(dip):
@@ -1421,7 +1427,7 @@ def tab_benefit_study():
                                        hint_y=prev_y, hint_ubat=prev_u)
                 dt = time.time() - t0
                 row = {"utterance": which, "dip": chosen, "controller": cname,
-                       "w_scale": float(wscale),
+                       "N_s": int(N_s), "w_scale": float(wscale),
                        "lambda_min_eff": float(theta["lambda_min"]),
                        "lambda_cost": float(theta.get("lambda_cost", 0.0)),
                        "alpha": a, "K": int(np.floor(a * N_s)),
