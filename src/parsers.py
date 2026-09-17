@@ -18,8 +18,8 @@ SimulatedLLMParser.
 """
 from __future__ import annotations
 import re
-from dataclasses import dataclass, asdict
-from typing import Dict, Any, Optional
+from dataclasses import dataclass, asdict, field
+from typing import Dict, Any, Optional, List
 
 
 @dataclass
@@ -38,6 +38,91 @@ class Intent:
     clarification_needed: int = 0
     parser_name: str = "stub"
     fallback: bool = False
+    schema_violations: List[str] = field(default_factory=list)
+
+    # ---- schema validation -------------------------------------------
+    _LABELS = {
+        "comfort_label": {"cool", "neutral", "warm", "hot"},
+        "cost_label":    {"low", "medium", "high"},
+        "dr_label":      {"low", "medium", "high"},
+    }
+    _UNIT = ("comfort_priority", "comfort_intensity", "dr_priority")
+    _BINARY = ("guest_flag", "medical_context", "clarification_needed")
+
+    def __post_init__(self):
+        """Coerce out-of-schema values to defaults and record every
+        violation, so the paper's 'schema-validated' claim is actually
+        enforced rather than merely asserted. Invalid values are never
+        silently propagated into the optimizer."""
+        if self.schema_violations is None:
+            self.schema_violations = []
+
+        for f_ in self._BINARY:
+            v = getattr(self, f_)
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                iv = 0
+                self.schema_violations.append(f"{f_}: not an integer ({v!r})")
+            if iv not in (0, 1):
+                self.schema_violations.append(f"{f_}: {v!r} not in {{0,1}}")
+                iv = 1 if iv > 1 else 0
+            setattr(self, f_, iv)
+
+        for f_ in self._UNIT:
+            v = getattr(self, f_)
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                fv = 0.5
+                self.schema_violations.append(f"{f_}: not a number ({v!r})")
+            if not (0.0 <= fv <= 1.0):
+                self.schema_violations.append(f"{f_}: {v!r} outside [0,1]")
+                fv = min(1.0, max(0.0, fv))
+            setattr(self, f_, fv)
+
+        for f_, allowed in self._LABELS.items():
+            v = getattr(self, f_)
+            if v not in allowed:
+                self.schema_violations.append(
+                    f"{f_}: {v!r} not in {sorted(allowed)}")
+                setattr(self, f_, "neutral" if f_ == "comfort_label" else "medium")
+
+        for f_ in ("window_start", "window_end"):
+            v = getattr(self, f_)
+            if v is None:
+                continue
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                self.schema_violations.append(f"{f_}: not an integer ({v!r})")
+                setattr(self, f_, None); continue
+            if not (0 <= iv <= 23):
+                self.schema_violations.append(f"{f_}: {v!r} outside [0,23]")
+                setattr(self, f_, None)
+            else:
+                setattr(self, f_, iv)
+
+        if (self.window_start is not None and self.window_end is not None
+                and self.window_end < self.window_start):
+            self.schema_violations.append(
+                f"window_end {self.window_end} < window_start {self.window_start}")
+            self.window_start, self.window_end = None, None
+
+        if self.budget is not None:
+            try:
+                bv = float(self.budget)
+                if bv < 0:
+                    self.schema_violations.append("budget: negative")
+                    bv = None
+            except (TypeError, ValueError):
+                self.schema_violations.append(f"budget: not a number ({self.budget!r})")
+                bv = None
+            self.budget = bv
+
+    @property
+    def schema_valid(self) -> bool:
+        return not self.schema_violations
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
