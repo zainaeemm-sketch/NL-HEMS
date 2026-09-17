@@ -297,12 +297,15 @@ def tab_single():
         # Scenarios
         scens = generate_scenarios(ctx, N_s=N_s, seed=42)
 
-        # Guest window
+        # Comfort window: activate for guest, medical, and any request
+        # with an explicit comfort window, so the chance constraint fires.
         gw = None
-        if intent_dict.get("guest_flag") == 1:
-            ws = intent_dict.get("window_start") or 18
-            we = intent_dict.get("window_end") or 23
-            gw = (int(ws), int(we))
+        _ws = int(intent_dict.get("window_start") or 19)
+        _we = int(intent_dict.get("window_end")   or 23)
+        if (intent_dict.get("guest_flag") == 1
+                or intent_dict.get("medical_context") == 1
+                or intent_dict.get("window_start")):
+            gw = (_ws, _we)
 
         with st.spinner("Solving stochastic CP-SAT..."):
             t0 = time.time()
@@ -556,10 +559,12 @@ decisions from the deterministic point-forecast problem.
         intent = parser.parse(utterance).to_dict()
         theta  = triangular_map(intent)
         gw = None
-        if intent.get("guest_flag") == 1:
-            ws = intent.get("window_start") or 19
-            we = intent.get("window_end") or 23
-            gw = (int(ws), int(we))
+        _ws = int(intent.get("window_start") or 19)
+        _we = int(intent.get("window_end")   or 23)
+        if (intent.get("guest_flag") == 1
+                or intent.get("medical_context") == 1
+                or intent.get("window_start")):
+            gw = (_ws, _we)
 
         scens = generate_scenarios(ctx, N_s=N_s, seed=42)
 
@@ -906,10 +911,12 @@ varies the **chance level alpha** and **scenario count N_s**.
         theta  = triangular_map(intent)
         theta["T_min"] = float(tmin_override)
         gw = None
-        if intent.get("guest_flag") == 1:
-            ws = intent.get("window_start") or 19
-            we = intent.get("window_end") or 23
-            gw = (int(ws), int(we))
+        _ws = int(intent.get("window_start") or 19)
+        _we = int(intent.get("window_end")   or 23)
+        if (intent.get("guest_flag") == 1
+                or intent.get("medical_context") == 1
+                or intent.get("window_start")):
+            gw = (_ws, _we)
 
         rows = []
         prog = st.progress(0.0)
@@ -1381,9 +1388,14 @@ def tab_benefit_study():
             two_level = 0.0 if medical else (0.3 if hedged else 0.0)
             bld = {**_building(E_bat, P_bat), "kappa": float(hvac)}
 
-            def inwin(T_rows):
+            def inwin(T_rows, thr=None):
+                # Score against the integer-rounded bound the model actually
+                # enforced (T_min_effective), not the raw float, so a
+                # schedule satisfying the constraint is never counted as
+                # violating it.
                 T = np.asarray(T_rows)
-                return [int(np.sum(T[w][gw[0] + 1: gw[1] + 1] < T_min - 1e-6))
+                th = float(T_min if thr is None else thr)
+                return [int(np.sum(T[w][gw[0] + 1: gw[1] + 1] < th - 1e-6))
                         for w in range(T.shape[0])]
 
             # ---- Stage 1: harshest dip at which alpha=0 is still feasible ----
@@ -1415,8 +1427,14 @@ def tab_benefit_study():
             ctxd = build_ctx(chosen)
             train = generate_scenarios(ctxd, N_s=N_s, sigma_Tout=spread, seed=42)
             test = generate_scenarios(ctxd, N_s=N_test, sigma_Tout=spread, seed=seed_test)
-            ctrls = sorted([("fixed alpha=0", 0.0), ("fixed alpha=0.2", 0.2),
-                            ("two-level rule", two_level), ("alpha(z)", a_z)],
+            # Levels chosen to give DISTINCT integer budgets
+            # K = floor(N_s * alpha). At N_s=16 these give K = 0, 2, 4;
+            # levels that collapse to the same K solve an identical
+            # program and cannot be compared.
+            ctrls = sorted([("alpha=0 (K=0)", 0.0),
+                            ("alpha=0.125", 0.125),
+                            ("alpha=0.25", 0.25),
+                            ("alpha(z)", a_z)],
                            key=lambda c: c[1])
             det = solve_deterministic(theta, ctxd, guest_window=gw, building=bld)
             prev_y, prev_u = det.get("y"), det.get("ubat")
@@ -1429,6 +1447,10 @@ def tab_benefit_study():
                                        hint_y=prev_y, hint_ubat=prev_u)
                 dt = time.time() - t0
                 row = {"utterance": which, "dip": chosen, "controller": cname,
+                       "status": sol.get("status"),
+                       "proved_infeasible": bool(sol.get("proved_infeasible")),
+                       "obj_norm": sol.get("objective_normalized"),
+                       "T_min_eff": sol.get("T_min_effective"),
                        "N_s": int(N_s), "w_scale": float(wscale),
                        "budget_req_s": int(budget),
                        "run_ts": time.strftime("%H:%M:%S"),
@@ -1443,7 +1465,8 @@ def tab_benefit_study():
                 if sol.get("feasible"):
                     prev_y, prev_u = sol.get("y"), sol.get("ubat")
                     o = sol["objective"]; b = sol.get("best_bound")
-                    vin = inwin(sol["T_in"])
+                    _thr = sol.get("T_min_effective", T_min)
+                    vin = inwin(sol["T_in"], _thr)
                     row.update({"obj_in": o, "best_bound": b,
                                 "gap_pct": (abs(o - b) / max(1.0, abs(o)) * 100.0)
                                 if b is not None else None,
@@ -1452,7 +1475,7 @@ def tab_benefit_study():
                                           building=bld, time_limit_s=20,
                                           fix_y=sol["y"], fix_ubat=sol["ubat"])
                     if ev.get("feasible"):
-                        vo = inwin(ev["T_in"])
+                        vo = inwin(ev["T_in"], ev.get("T_min_effective", _thr))
                         row.update({"cost_oos": ev["objective"],
                                     "viol_oos_mean_min": float(np.mean(vo)) * 60.0,
                                     "cvar_oos_min": cvar_alpha(vo, 0.2) * 60.0,
