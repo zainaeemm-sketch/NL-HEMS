@@ -129,27 +129,82 @@ def replay_first_stage(theta: dict,
                        test_scenarios: list,
                        guest_window: tuple[int, int] | None = None,
                        building: dict | None = None,
-                       time_limit_s: float = 5.0) -> List[Dict[str, Any]]:
+                       time_limit_s: float = 5.0,
+                       joint: bool = True) -> Dict[str, Any]:
     """
-    Replay the first-stage decisions on out-of-sample scenarios.
-    Used for Robust Feasibility Rate (RFR) and VSS computation.
+    Replay a committed first-stage plan (y_fixed, ubat_fixed) on
+    out-of-sample scenarios, for RFR and VSS evaluation.
+
+    joint=True  : one solve over the whole test ensemble with the first
+                  stage fixed. This is the evaluation required to bound
+                  the VSS, because it returns a single objective with
+                  the solver's incumbent and lower bound.
+    joint=False : one solve per scenario (diagnostic only).
+
+    The chance constraint is DISABLED (alpha=1.0) during replay: the plan
+    is being evaluated, not re-optimized, so comfort outcomes must be
+    observed rather than enforced. Returns the solver status so that a
+    timeout (UNKNOWN) is never mistaken for proven infeasibility.
     """
-    results = []
-    for scen in test_scenarios:
-        ctx = {
-            "T_out": scen["T_out"], "price": scen["price"],
-            "PV": scen["PV"], "d": scen["d"],
-            "horizon": len(scen["T_out"]),
-        }
-        # Solve again but force y / ubat (no degrees of freedom on first stage)
-        # Simpler approximation: simulate forward with fixed y / ubat,
-        # solving only the LP-like recourse (here as a single-scenario CP-SAT
-        # with extra fixing constraints).
-        scen_list = [{**scen, "prob": 1.0}]
+    if joint:
+        scen_list = [{**sc, "prob": 1.0 / len(test_scenarios)}
+                     for sc in test_scenarios]
         sol = solve_stochastic(theta=theta, scenarios=scen_list,
-                               alpha=0.0 if guest_window else 1.0,
+                               alpha=1.0,
                                guest_window=guest_window,
                                building=building,
-                               time_limit_s=time_limit_s)
-        results.append(sol)
-    return results
+                               time_limit_s=time_limit_s,
+                               fix_y=y_fixed, fix_ubat=ubat_fixed)
+        return {
+            "joint": True,
+            "feasible": bool(sol.get("feasible")),
+            "status": sol.get("status"),
+            "proved_infeasible": bool(sol.get("proved_infeasible")),
+            "objective": sol.get("objective"),
+            "best_bound": sol.get("best_bound"),
+            "objective_normalized": sol.get("objective_normalized"),
+            "T_min_effective": sol.get("T_min_effective"),
+            "T_in": sol.get("T_in"),
+        }
+
+    per_scenario = []
+    for scen in test_scenarios:
+        sol = solve_stochastic(theta=theta,
+                               scenarios=[{**scen, "prob": 1.0}],
+                               alpha=1.0,
+                               guest_window=guest_window,
+                               building=building,
+                               time_limit_s=time_limit_s,
+                               fix_y=y_fixed, fix_ubat=ubat_fixed)
+        per_scenario.append({
+            "feasible": bool(sol.get("feasible")),
+            "status": sol.get("status"),
+            "proved_infeasible": bool(sol.get("proved_infeasible")),
+            "objective": sol.get("objective"),
+            "T_min_effective": sol.get("T_min_effective"),
+            "T_in": sol.get("T_in"),
+        })
+    return {"joint": False, "per_scenario": per_scenario}
+
+
+def vss_bounds(replay: Dict[str, Any], sp: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Interval for the Value of Stochastic Solution from a feasible joint
+    replay of the expected-value plan and the stochastic solve:
+
+        L_EV - U_SP  <=  VSS  <=  U_EV - L_SP
+
+    where [L, U] are (best_bound, objective) of each solve. Returns None
+    bounds when either solve did not produce both quantities.
+    """
+    L_ev, U_ev = replay.get("best_bound"), replay.get("objective")
+    L_sp, U_sp = sp.get("best_bound"), sp.get("objective")
+    ok = all(v is not None for v in (L_ev, U_ev, L_sp, U_sp)) \
+        and replay.get("feasible") and sp.get("feasible")
+    if not ok:
+        return {"certified": False, "lower": None, "upper": None,
+                "reason": "replay or stochastic solve lacks bounds "
+                          "or was not feasible"}
+    return {"certified": True,
+            "lower": L_ev - U_sp,
+            "upper": U_ev - L_sp}
