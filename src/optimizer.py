@@ -280,8 +280,11 @@ def solve_stochastic(theta: dict,
     lam_min  = float(p["lambda_min"])
     lam_sw   = float(p["lambda_sw"])
 
+    prob_ints = [int(round(scenarios[w]["prob"] * 1000)) for w in range(N)]
+    prob_weight_total = sum(prob_ints)
+
     for w in range(N):
-        prob_int = int(round(scenarios[w]["prob"] * 1000))
+        prob_int = prob_ints[w]
         for t in range(H):
             # net import - cost
             price_int = int(round(scenarios[w]["price"][t] * 100))   # cents
@@ -306,6 +309,10 @@ def solve_stochastic(theta: dict,
 
     out = {
         "status":          solver.StatusName(status),
+        "proved_infeasible": status == cp_model.INFEASIBLE,
+        "T_min_effective": T_min_int / SC_T,
+        "T_tar_effective": T_tar_int / SC_T,
+        "prob_weight_total": prob_weight_total,
         "feasible":        status in (cp_model.OPTIMAL, cp_model.FEASIBLE),
         "objective":       solver.ObjectiveValue() if status in
                             (cp_model.OPTIMAL, cp_model.FEASIBLE) else None,
@@ -313,6 +320,9 @@ def solve_stochastic(theta: dict,
         "best_bound":      (solver.BestObjectiveBound() if status in
                             (cp_model.OPTIMAL, cp_model.FEASIBLE) else None),
         "optimal":         status == cp_model.OPTIMAL,
+        "objective_normalized": (solver.ObjectiveValue() / prob_weight_total
+                                 if status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+                                 and prob_weight_total else None),
         "alpha":           alpha,
         "N_scenarios":     N,
         "horizon":         H,
