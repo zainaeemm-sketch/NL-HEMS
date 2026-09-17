@@ -45,14 +45,27 @@ def comfort_violation_count(T_in: np.ndarray, T_min: float) -> int:
 
 
 def cvar_alpha(violation_per_scenario: List[int], alpha: float) -> float:
-    """Eq. 27. CVaR on comfort violation counts at level alpha."""
+    """Exact discrete CVaR at upper-tail probability alpha for a finite
+    equiprobable scenario set (Rockafellar & Uryasev; Sarykalin, Serraino
+    & Uryasev 2008). When alpha*N is not an integer the boundary
+    observation carries fractional weight. Averaging the worst
+    ceil(alpha*N) observations never exceeds this value.
+    """
     arr = np.asarray(violation_per_scenario, dtype=float)
     if arr.size == 0:
         return 0.0
-    arr_sorted = np.sort(arr)[::-1]
-    k = max(1, int(np.ceil(alpha * arr.size)))
-    return float(np.mean(arr_sorted[:k]))
-
+    N = arr.size
+    if alpha <= 0.0:
+        return float(np.max(arr))
+    if alpha >= 1.0:
+        return float(np.mean(arr))
+    srt = np.sort(arr)[::-1]
+    m = alpha * N
+    full = int(np.floor(m))
+    frac = m - full
+    if frac <= 1e-12:
+        return float(np.mean(srt[:max(1, full)]))
+    return float((srt[:full].sum() + frac * srt[full]) / m)
 
 def robust_feasibility_rate(replay_results: List[Dict[str, Any]]) -> float:
     """Eq. 28. Fraction of out-of-sample scenarios for which the
