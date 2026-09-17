@@ -324,6 +324,13 @@ def tab_single():
                      for k, v in theta.items() if not k.startswith("_")})
             st.metric("alpha (chance level)", f"{alpha:.3f}",
                       help="Derived from the linguistic intent via alpha_from_intent")
+            if gw is None:
+                st.error("Active comfort window: NONE -- the chance "
+                         "constraint is NOT enforced for this utterance.")
+            else:
+                st.success("Active comfort window: hours "
+                           + str(gw[0]) + "-" + str(gw[1])
+                           + "  ->  chance constraint enforced here")
 
         st.subheader("Schedule")
         if not sol["feasible"]:
