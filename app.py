@@ -1434,15 +1434,22 @@ def tab_benefit_study():
             ctxd = build_ctx(chosen)
             train = generate_scenarios(ctxd, N_s=N_s, sigma_Tout=spread, seed=42)
             test = generate_scenarios(ctxd, N_s=N_test, sigma_Tout=spread, seed=seed_test)
-            # Levels chosen to give DISTINCT integer budgets
-            # K = floor(N_s * alpha). At N_s=16 these give K = 0, 2, 4;
-            # levels that collapse to the same K solve an identical
-            # program and cannot be compared.
-            ctrls = sorted([("alpha=0 (K=0)", 0.0),
-                            ("alpha=0.125", 0.125),
-                            ("alpha=0.25", 0.25),
-                            ("alpha(z)", a_z)],
-                           key=lambda c: c[1])
+            # Derive the comparison levels FROM N_s so that every
+            # controller has a DISTINCT integer budget K = floor(N_s*alpha).
+            # Using alpha = K/N_s reproduces exactly that K. Levels that
+            # collapse to the same K solve an identical program and cannot
+            # be compared, so they are merged rather than double-counted.
+            Kz = int(np.floor(N_s * a_z))
+            Kset = sorted({0, Kz,
+                           int(round(N_s * 0.125)),
+                           int(round(N_s * 0.25))})
+            Kset = [k for k in Kset if 0 <= k < N_s]
+            ctrls = []
+            for k in Kset:
+                lab = "K=" + str(k) + " (alpha=" + format(k / N_s, ".3f") + ")"
+                if k == Kz:
+                    lab += " = alpha(z)"
+                ctrls.append((lab, k / N_s))
             det = solve_deterministic(theta, ctxd, guest_window=gw, building=bld)
             prev_y, prev_u = det.get("y"), det.get("ubat")
             rows = []
@@ -1523,7 +1530,7 @@ def tab_benefit_study():
                    "solver gap and proves nothing.")
         for u in df.utterance.unique():
             sub = df[(df.utterance == u) & df.feasible]
-            base = sub[sub.controller == "fixed alpha=0"]
+            base = sub[sub.alpha == 0.0]
             if base.empty or base.iloc[0]["best_bound"] is None:
                 st.write("**" + u + "**: no feasible alpha=0 baseline.")
                 continue
@@ -1531,7 +1538,7 @@ def tab_benefit_study():
             spent = sub.viol_in_mean_min.fillna(0).max() > 0
             lines = []
             for _, r in sub.iterrows():
-                if r["controller"] == "fixed alpha=0" or r["obj_in"] is None:
+                if float(r["alpha"]) == 0.0 or r["obj_in"] is None:
                     continue
                 ok = float(r["obj_in"]) < lb0
                 lines.append(("PASS" if ok else "not attributable") +
