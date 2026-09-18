@@ -1178,13 +1178,59 @@ def tab_reviewer():
                         "Solve time (s)":f"{t_solve:.1f}",
                         "Gap (%)":("opt" if sol_orig.get("optimal") else (f"{g:.1f}" if g is not None else "---"))}
 
+            # Configuration snapshot taken at Run time. Slider positions can
+            # be changed after a run while the app still displays the previous
+            # output, so the provenance record must be captured here.
+            run_cfg = {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "utterance": utterance,
+                "N_s": int(N_s),
+                "alpha_manual": float(alpha),
+                "K": int(np.floor(N_s * float(alpha))),
+                "base_cold_shift_C": float(cold),
+                "window_dip_C": float(win_dip),
+                "sigma_Tout": float(spread),
+                "hvac_kappa_kW": float(hvac),
+                "solver_budget_s": float(tlim),
+                "scenario_seed": 42,
+                "guest_window": str(gw),
+                "T_min_theta": float(T_min),
+                "T_min_enforced": float(T_min_eff),
+                "status_det": sol_d.get("status"),
+                "status_hard": sol_h.get("status"),
+                "status_stoch": sol_s.get("status"),
+                "status_replay": sol_d_eval.get("status"),
+                "obj_stoch": sol_s.get("objective"),
+                "bound_stoch": sol_s.get("best_bound"),
+                "obj_replay_EV": sol_d_eval.get("objective"),
+                "bound_replay_EV": sol_d_eval.get("best_bound"),
+                "obj_hard_alpha0": sol_h.get("objective"),
+                "bound_hard_alpha0": sol_h.get("best_bound"),
+                "vss_lower": vss_iv.get("lower"),
+                "vss_upper": vss_iv.get("upper"),
+                "vss_certified": vss_iv.get("certified"),
+                "prob_weight_total": sol_s.get("prob_weight_total"),
+            }
+            df_cfg = pd.DataFrame([run_cfg])
+
             df_t3 = pd.DataFrame([row("Stochastic", sol_s, sol_s, t_s),
                                   row("Deterministic", sol_d_eval, sol_d, t_d)])
             df_ab = pd.DataFrame([row("Without chance constraint (alpha=0)",     sol_h, sol_h, t_h),
                                   row("With chance constraint (alpha=alpha(z))", sol_s, sol_s, t_s)])
             delta = (sol_h["objective"]-sol_s["objective"]
                      if (sol_s.get("feasible") and sol_h.get("feasible")) else None)
+            for _df in (df_t3, df_ab):
+                _df["N_s"] = int(N_s)
+                _df["alpha_manual"] = float(alpha)
+                _df["kappa_kW"] = float(hvac)
+                _df["cold_shift_C"] = float(cold)
+                _df["window_dip_C"] = float(win_dip)
+                _df["sigma_Tout"] = float(spread)
+                _df["budget_s"] = float(tlim)
+                _df["T_min_enforced"] = float(T_min_eff)
+                _df["run_ts"] = run_cfg["timestamp"]
             st.session_state["rev"]={"t3":df_t3,"ab":df_ab,"vss":vss,"delta":delta,
+                                     "cfg":df_cfg,
                                      "vss_iv":vss_iv,"T_min_eff":T_min_eff,
                                      "statuses":{"det":sol_d.get("status"),
                                                  "hard":sol_h.get("status"),
@@ -1225,6 +1271,13 @@ def tab_reviewer():
             st.metric("Cost saved by allowing bounded risk (without - with)", f"{R['delta']:.0f}")
         st.download_button("Download alpha_ablation.csv", R["ab"].to_csv(index=False).encode(),
                            file_name="alpha_ablation.csv", key="dl_ab")
+        if R.get("cfg") is not None:
+            st.subheader("Run configuration (captured at Run time)")
+            st.dataframe(R["cfg"].T.rename(columns={0: "value"}),
+                         use_container_width=True)
+            st.download_button("Download run_config.csv",
+                               R["cfg"].to_csv(index=False).encode(),
+                               file_name="run_config.csv", key="dl_cfg")
               
 # =====================================================================
 # Router
