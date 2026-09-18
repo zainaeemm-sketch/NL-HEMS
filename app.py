@@ -903,6 +903,12 @@ varies the **chance level alpha** and **scenario count N_s**.
                             default=[0.0, 0.1, 0.2, 0.3])
     N_list = st.multiselect("N_s values", [4, 6, 8, 12, 16, 24, 32],
                             default=[4, 8, 16, 24, 32])
+    sweep_budget = st.slider("Solver budget per solve (s)", 15, 300, 120, 15,
+                             key="sw_budget",
+                             help="Each cell is solved to this limit. Raw "
+                                  "objectives are not comparable across N_s "
+                                  "because the integer scenario weights sum "
+                                  "differently; use objective_normalized.")
     tmin_override = st.slider("T_min for the sweep (°C)",
                               min_value=20.0, max_value=23.0,
                               value=22.0, step=0.5,
@@ -927,31 +933,54 @@ varies the **chance level alpha** and **scenario count N_s**.
 
         rows = []
         prog = st.progress(0.0)
-        total = len(alphas) * len(N_list)
+        seeds = [42, 43, 44]
+        total = len(alphas) * len(N_list) * len(seeds)
         k = 0
+        _ts = time.strftime("%Y-%m-%d %H:%M:%S")
         for a in alphas:
             for N in N_list:
-                scens = generate_scenarios(ctx, N_s=N, seed=42)
-                t0 = time.time()
-                sol = solve_stochastic(theta, scens, alpha=a,
-                                       guest_window=gw,
-                                       building=_building(E_bat, P_bat),
-                                       time_limit_s=15)
-                cv = ([comfort_violation_count(sol["T_in"][w], theta["T_min"])
-                       for w in range(sol["N_scenarios"])]
-                      if sol.get("feasible") else [None])
-                rows.append({
-                    "alpha": a, "N_s": N,
-                    "feasible": sol["feasible"],
-                    "objective": sol.get("objective"),
-                    "wall_s":    time.time() - t0,
-                    "mean_CV":   float(np.mean([x for x in cv if x is not None]))
-                                  if any(x is not None for x in cv) else None,
-                    "max_CV":    float(np.max([x for x in cv if x is not None]))
-                                  if any(x is not None for x in cv) else None,
-                })
-                k += 1
-                prog.progress(k / total)
+                for sd in seeds:
+                    scens = generate_scenarios(ctx, N_s=N, seed=sd)
+                    t0 = time.time()
+                    sol = solve_stochastic(theta, scens, alpha=a,
+                                           guest_window=gw,
+                                           building=_building(E_bat, P_bat),
+                                           time_limit_s=sweep_budget)
+                    wall = time.time() - t0
+                    thr = sol.get("T_min_effective", theta["T_min"])
+                    if sol.get("feasible"):
+                        T = np.asarray(sol["T_in"])
+                        lo = (gw[0] + 1) if gw else 1
+                        hi = (gw[1] + 1) if gw else T.shape[1]
+                        cv = [int(np.sum(T[w][lo:hi] < float(thr) - 1e-6))
+                              for w in range(T.shape[0])]
+                    else:
+                        cv = []
+                    o = sol.get("objective"); b = sol.get("best_bound")
+                    rows.append({
+                        "alpha": a, "N_s": N, "seed": sd,
+                        "K": int(np.floor(N * a)),
+                        "alpha_effective": float(np.floor(N * a)) / N,
+                        "feasible": sol.get("feasible"),
+                        "status": sol.get("status"),
+                        "proved_infeasible": bool(sol.get("proved_infeasible")),
+                        "objective_raw": o,
+                        "objective_normalized": sol.get("objective_normalized"),
+                        "best_bound": b,
+                        "gap_pct": (abs(o - b) / max(1.0, abs(o)) * 100.0)
+                                   if (o not in (None, 0) and b is not None) else None,
+                        "prob_weight_total": sol.get("prob_weight_total"),
+                        "T_min_enforced": thr,
+                        "wall_s": wall,
+                        "budget_req_s": float(sweep_budget),
+                        "mean_CV_inwin_min": float(np.mean(cv)) * 60.0 if cv else None,
+                        "max_CV_inwin_min": float(np.max(cv)) * 60.0 if cv else None,
+                        "rfr_pct": (100.0 * float(np.mean([c == 0 for c in cv]))
+                                    if cv else None),
+                        "run_ts": _ts,
+                    })
+                    k += 1
+                    prog.progress(k / total)
         prog.empty()
 
         df = pd.DataFrame(rows)
@@ -961,23 +990,33 @@ varies the **chance level alpha** and **scenario count N_s**.
                            df.to_csv(index=False).encode("utf-8"),
                            file_name="sweep_results.csv", mime="text/csv")
         if not df.empty:
-            fig1 = px.line(df, x="alpha", y="objective", color="N_s",
+            dfm = (df.groupby(["alpha", "N_s"], as_index=False)
+                     .agg({"objective_normalized": "mean",
+                           "mean_CV_inwin_min": "mean",
+                           "rfr_pct": "mean",
+                           "wall_s": "mean",
+                           "gap_pct": "mean"}))
+            fig1 = px.line(dfm, x="alpha", y="objective_normalized", color="N_s",
                            markers=True,
                            labels={"alpha": "Chance level \u03b1 (\u2014)",
-                                   "objective": "Objective J (\u2014)",
+                                   "objective_normalized":
+                                       "Normalized objective (\u2014)",
                                    "N_s": "Scenarios N_s (\u2014)"},
-                           title="Stochastic objective vs chance level \u03b1",
+                           title="Normalized objective vs chance level \u03b1 "
+                                 "(mean of 3 seeds)",
                     color_discrete_sequence=PRINT_PALETTE)
             style_for_print(fig1)
-            fig2 = px.line(df, x="alpha", y="mean_CV", color="N_s",
+            fig2 = px.line(dfm, x="alpha", y="mean_CV_inwin_min", color="N_s",
                            markers=True,
                            labels={"alpha": "Chance level \u03b1 (\u2014)",
-                                   "mean_CV": "Mean comfort violation (h)",
+                                   "mean_CV_inwin_min":
+                                       "Mean in-window violation (min)",
                                    "N_s": "Scenarios N_s (\u2014)"},
-                           title="Mean comfort violation vs chance level \u03b1",
+                           title="In-window comfort violation vs chance level "
+                                 "\u03b1 (mean of 3 seeds)",
                     color_discrete_sequence=PRINT_PALETTE)
             style_for_print(fig2)
-            fig3 = px.line(df, x="N_s", y="wall_s", color="alpha",
+            fig3 = px.line(dfm, x="N_s", y="wall_s", color="alpha",
                            markers=True,
                            labels={"N_s": "Number of scenarios N_s (\u2014)",
                                    "wall_s": "Solve time (s)",
