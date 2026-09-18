@@ -15,6 +15,7 @@ Streamlit dashboard exposing each component of the framework:
 """
 from __future__ import annotations
 import time
+import json
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -451,10 +452,13 @@ def tab_benchmark():
                 prog.progress(done / max(1, total_items * len(chosen)),
                               text=f"[{parser_name}] {item.sid}: "
                                    f"{item.text[:60]}...")
-                pred = parser.parse(item.text).to_dict()
+                _obj = parser.parse(item.text)
+                pred = _obj.to_dict()
                 fm = field_match(pred, item.gold)
                 guest_match = int(pred.get("guest_flag") == item.gold.get("guest_flag"))
-                recs.append({
+                CAT5 = ("guest_flag", "comfort_label", "cost_label",
+                        "dr_label", "medical_context")
+                rec = {
                     "parser":     parser_name,
                     "id":         item.sid,
                     "difficulty": DIFFICULTY_NAMES[item.difficulty],
@@ -462,11 +466,36 @@ def tab_benchmark():
                     "field_f1":   fm["f1"],
                     "guest_match": guest_match,
                     "fallback":   1 if pred.get("fallback") else 0,
-                    "predicted_guest": pred.get("guest_flag"),
-                    "gold_guest":     item.gold.get("guest_flag"),
-                    "predicted_comfort": pred.get("comfort_label"),
-                    "gold_comfort": item.gold.get("comfort_label"),
-                })
+                    "parser_name_reported": pred.get("parser_name"),
+                    "schema_violations": "; ".join(
+                        getattr(_obj, "schema_violations", []) or []),
+                    "schema_valid": int(not (getattr(_obj, "schema_violations", []) or [])),
+                    "pred_json": json.dumps(pred, sort_keys=True, default=str),
+                    "gold_json": json.dumps(item.gold, sort_keys=True, default=str),
+                }
+                # per-field predicted/gold/match for the five scored categoricals
+                for f_ in CAT5:
+                    rec["pred_" + f_] = pred.get(f_)
+                    rec["gold_" + f_] = item.gold.get(f_)
+                    rec["match_" + f_] = (None if item.gold.get(f_) is None
+                                          else int(pred.get(f_) == item.gold.get(f_)))
+                # time-window and numeric risk cues, scored SEPARATELY because
+                # they are not part of the five-field F1 reported in the paper
+                for f_ in ("window_start", "window_end"):
+                    rec["pred_" + f_] = pred.get(f_)
+                    rec["gold_" + f_] = item.gold.get(f_)
+                    rec["match_" + f_] = (None if item.gold.get(f_) is None
+                                          else int(pred.get(f_) == item.gold.get(f_)))
+                _gw_fields = [rec["match_window_start"], rec["match_window_end"]]
+                _gw_scored = [x for x in _gw_fields if x is not None]
+                rec["window_acc"] = (float(np.mean(_gw_scored)) if _gw_scored else None)
+                for f_ in ("comfort_priority", "comfort_intensity", "dr_priority"):
+                    rec["pred_" + f_] = pred.get(f_)
+                    gv = item.gold.get(f_)
+                    rec["gold_" + f_] = gv
+                    rec["abserr_" + f_] = (None if gv is None or pred.get(f_) is None
+                                           else abs(float(pred.get(f_)) - float(gv)))
+                recs.append(rec)
                 pred_clar.append(int(pred.get("clarification_needed") or 0))
                 gold_clar.append(int(item.needs_clarification or 0))
                 done += 1
@@ -480,6 +509,57 @@ def tab_benchmark():
         df = pd.DataFrame(rows)
         st.subheader("Per-utterance results")
         st.dataframe(df, hide_index=True, use_container_width=True)
+
+        # ---- evidence archive -------------------------------------------
+        cfg_rows = []
+        for pname in chosen:
+            p = parsers[pname]
+            stt = p.status() if hasattr(p, "status") else {}
+            cfg_rows.append({
+                "run_ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "parser": pname,
+                "class": type(p).__name__,
+                "backend": stt.get("backend"),
+                "client_ready": stt.get("client_ready"),
+                "model": stt.get("model"),
+                "base_url": stt.get("base_url"),
+                "last_error": str(stt.get("last_error"))[:300],
+                "system_prompt": (getattr(p, "SYSTEM_PROMPT", None)
+                                  or getattr(p, "_system_prompt", None)),
+                "n_utterances": int((df.parser == pname).sum()),
+                "fallback_rate_pct": float(df.loc[df.parser == pname,
+                                                  "fallback"].mean() * 100.0),
+                "schema_valid_pct": float(df.loc[df.parser == pname,
+                                                 "schema_valid"].mean() * 100.0),
+                "scored_fields": "guest_flag,comfort_label,cost_label,"
+                                 "dr_label,medical_context",
+            })
+        df_cfg = pd.DataFrame(cfg_rows)
+        st.subheader("Parser run configuration")
+        st.dataframe(df_cfg, hide_index=True, use_container_width=True)
+        c_a, c_b = st.columns(2)
+        with c_a:
+            st.download_button("Download parser_predictions.csv",
+                               df.to_csv(index=False).encode("utf-8"),
+                               file_name="parser_predictions.csv",
+                               mime="text/csv", key="dl_pred")
+        with c_b:
+            st.download_button("Download parser_run_config.csv",
+                               df_cfg.to_csv(index=False).encode("utf-8"),
+                               file_name="parser_run_config.csv",
+                               mime="text/csv", key="dl_pcfg")
+
+        st.subheader("Separately scored: time window and numeric risk cues")
+        _extra = (df.groupby("parser")
+                    .agg(window_acc=("window_acc", "mean"),
+                         mae_comfort_priority=("abserr_comfort_priority", "mean"),
+                         mae_comfort_intensity=("abserr_comfort_intensity", "mean"),
+                         mae_dr_priority=("abserr_dr_priority", "mean"))
+                    .round(3))
+        st.dataframe(_extra)
+        st.caption("These fields are NOT part of the five-field F1 reported in "
+                   "the paper; they are scored here separately, as window and "
+                   "numeric cues are a distinct capability claim.")
 
         st.subheader("Parser-level summary")
         agg = (df.groupby("parser").agg(
