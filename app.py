@@ -903,7 +903,11 @@ varies the **chance level alpha** and **scenario count N_s**.
                             default=[0.0, 0.1, 0.2, 0.3])
     N_list = st.multiselect("N_s values", [4, 6, 8, 12, 16, 24, 32],
                             default=[4, 8, 16, 24, 32])
-    sweep_budget = st.slider("Solver budget per solve (s)", 15, 300, 120, 15,
+    n_seeds = st.select_slider("Scenario draws per cell (seeds)",
+                               options=[1, 2, 3], value=1, key="sw_seeds",
+                               help="Repeated draws quantify seed variability. "
+                                    "Start with 1 to size the run, then raise it.")
+    sweep_budget = st.slider("Solver budget per solve (s)", 10, 300, 30, 10,
                              key="sw_budget",
                              help="Each cell is solved to this limit. Raw "
                                   "objectives are not comparable across N_s "
@@ -933,7 +937,10 @@ varies the **chance level alpha** and **scenario count N_s**.
 
         rows = []
         prog = st.progress(0.0)
-        seeds = [42, 43, 44]
+        status_box = st.empty()
+        live_box = st.empty()
+        _t_start = time.time()
+        seeds = [42, 43, 44][:int(n_seeds)]
         total = len(alphas) * len(N_list) * len(seeds)
         k = 0
         _ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -981,14 +988,31 @@ varies the **chance level alpha** and **scenario count N_s**.
                     })
                     k += 1
                     prog.progress(k / total)
-        prog.empty()
+                    # Persist after EVERY cell so a dropped session keeps
+                    # whatever finished, and show progress with an ETA.
+                    st.session_state["sw_rows"] = list(rows)
+                    _el = time.time() - _t_start
+                    _eta = _el / max(1, k) * (total - k)
+                    status_box.info("cell " + str(k) + "/" + str(total)
+                                    + "  |  alpha=" + str(a) + " N_s=" + str(N)
+                                    + " seed=" + str(sd)
+                                    + "  |  elapsed " + str(int(_el // 60)) + "m"
+                                    + "  |  est. remaining "
+                                    + str(int(_eta // 60)) + "m")
+                    live_box.dataframe(pd.DataFrame(rows).tail(8),
+                                       hide_index=True, use_container_width=True)
+        prog.empty(); status_box.success("Sweep finished: " + str(k) + " cells.")
 
+    # ---- results render OUTSIDE the button block, from session_state ----
+    rows = st.session_state.get("sw_rows")
+    if rows:
         df = pd.DataFrame(rows)
-        st.subheader("Sweep results")
+        st.subheader("Sweep results (" + str(len(df)) + " cells)")
         st.dataframe(df, hide_index=True, use_container_width=True)
         st.download_button("Download sweep_results.csv",
                            df.to_csv(index=False).encode("utf-8"),
-                           file_name="sweep_results.csv", mime="text/csv")
+                           file_name="sweep_results.csv", mime="text/csv",
+                           key="dl_sweep")
         if not df.empty:
             dfm = (df.groupby(["alpha", "N_s"], as_index=False)
                      .agg({"objective_normalized": "mean",
