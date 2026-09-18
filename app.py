@@ -1103,8 +1103,12 @@ def tab_reviewer():
             intent = SimulatedLLMParser().parse(utterance).to_dict()
             theta  = triangular_map(intent)
             gw = None
-            if intent.get("guest_flag") == 1:
-                gw = (int(intent.get("window_start") or 19), int(intent.get("window_end") or 23))
+            _ws = int(intent.get("window_start") or 19)
+            _we = int(intent.get("window_end")   or 23)
+            if (intent.get("guest_flag") == 1
+                    or intent.get("medical_context") == 1
+                    or intent.get("window_start")):
+                gw = (_ws, _we)
             Tout = np.asarray(ctx["T_out"], dtype=float) - float(cold)
             if gw is not None:
                 for t in range(gw[0], min(gw[1] + 1, len(Tout))):
@@ -1125,19 +1129,41 @@ def tab_reviewer():
                 t0=time.time(); sol_s = solve_stochastic(theta, scens, alpha=alpha, guest_window=gw,
                     building=bld, time_limit_s=tlim, hint_y=sol_h.get("y"), hint_ubat=sol_h.get("ubat")); t_s=time.time()-t0
             with st.spinner("Replaying deterministic plan (for VSS)..."):
-                sol_d_eval = (solve_stochastic(theta=theta, scenarios=scens, alpha=alpha, guest_window=gw,
-                                building=bld, fix_y=dy, fix_ubat=du, time_limit_s=tlim)
-                              if sol_d.get("feasible") else {"feasible": False, "objective": None})
+                # Joint replay of the committed EV plan on the SAME ensemble,
+                # with the chance constraint DISABLED (alpha=1.0): the plan is
+                # being evaluated, not re-optimized. Re-imposing a chance
+                # constraint here would make the replay infeasible whenever the
+                # EV plan violates it, which is not what the VSS requires.
+                sol_d_eval = (solve_stochastic(theta=theta, scenarios=scens, alpha=1.0,
+                                guest_window=gw, building=bld,
+                                fix_y=dy, fix_ubat=du, time_limit_s=tlim)
+                              if sol_d.get("feasible") else
+                              {"feasible": False, "objective": None, "best_bound": None,
+                               "status": "not attempted"})
             vss = (value_of_stochastic_solution(sol_s["objective"], sol_d_eval["objective"])
                    if (sol_s.get("feasible") and sol_d_eval.get("feasible")) else None)
+            # Certified interval: L_EV - U_SP <= VSS <= U_EV - L_SP
+            _Lev, _Uev = sol_d_eval.get("best_bound"), sol_d_eval.get("objective")
+            _Lsp, _Usp = sol_s.get("best_bound"), sol_s.get("objective")
+            if (all(v is not None for v in (_Lev, _Uev, _Lsp, _Usp))
+                    and sol_d_eval.get("feasible") and sol_s.get("feasible")):
+                vss_iv = {"certified": True, "lower": _Lev - _Usp, "upper": _Uev - _Lsp,
+                          "replay_status": sol_d_eval.get("status"),
+                          "sp_status": sol_s.get("status")}
+            else:
+                vss_iv = {"certified": False, "lower": None, "upper": None,
+                          "replay_status": sol_d_eval.get("status"),
+                          "sp_status": sol_s.get("status")}
 
             def gap(sol):
                 o=sol.get("objective"); b=sol.get("best_bound")
                 if o in (None,0) or b is None: return None
                 return abs(o-b)/max(1.0, abs(o))*100.0
-            def inwin(T_row):
-                if gw is None: return int(np.sum(np.asarray(T_row)[1:] < T_min - 1e-6))
-                return int(np.sum(np.asarray(T_row)[gw[0]+1: gw[1]+1] < T_min - 1e-6))
+            T_min_eff = sol_h.get("T_min_effective", T_min) or T_min
+            def inwin(T_row, thr=None):
+                th = float(T_min_eff if thr is None else thr)
+                if gw is None: return int(np.sum(np.asarray(T_row)[1:] < th - 1e-6))
+                return int(np.sum(np.asarray(T_row)[gw[0]+1: gw[1]+1] < th - 1e-6))
             def row(label, sol_eval, sol_orig, t_solve):
                 if not sol_eval.get("feasible") or not sol_orig.get("feasible"):
                     return {"Method":label,"Objective":"infeasible","In-win CV (min)":"---",
@@ -1158,7 +1184,12 @@ def tab_reviewer():
                                   row("With chance constraint (alpha=alpha(z))", sol_s, sol_s, t_s)])
             delta = (sol_h["objective"]-sol_s["objective"]
                      if (sol_s.get("feasible") and sol_h.get("feasible")) else None)
-            st.session_state["rev"]={"t3":df_t3,"ab":df_ab,"vss":vss,"delta":delta}
+            st.session_state["rev"]={"t3":df_t3,"ab":df_ab,"vss":vss,"delta":delta,
+                                     "vss_iv":vss_iv,"T_min_eff":T_min_eff,
+                                     "statuses":{"det":sol_d.get("status"),
+                                                 "hard":sol_h.get("status"),
+                                                 "stoch":sol_s.get("status"),
+                                                 "replay":sol_d_eval.get("status")}}
         except Exception:
             st.session_state["rev_err"]=traceback.format_exc()
 
@@ -1168,7 +1199,24 @@ def tab_reviewer():
     if R:
         st.subheader("Table III (no MPC) -- comfort in-window")
         st.dataframe(R["t3"], hide_index=True, use_container_width=True)
-        st.metric("VSS", f"{R['vss']:.0f}" if R["vss"] is not None else "n/a")
+        st.metric("VSS (difference of returned objectives)",
+                  f"{R['vss']:.0f}" if R["vss"] is not None else "n/a")
+        _iv = R.get("vss_iv") or {}
+        if _iv.get("certified"):
+            st.success("Certified VSS interval: ["
+                       + format(_iv["lower"]/1e9, ".3f") + ", "
+                       + format(_iv["upper"]/1e9, ".3f") + "] x10^9"
+                       + ("  -- strictly positive, so the VSS is certified positive"
+                          if _iv["lower"] > 0 else
+                          "  -- straddles zero, so the sign of the VSS is NOT certified"))
+        else:
+            st.warning("VSS interval not certified: replay or stochastic solve "
+                       "lacked bounds. replay status="
+                       + str(_iv.get("replay_status")) + ", SP status="
+                       + str(_iv.get("sp_status")))
+        if R.get("statuses"):
+            st.caption("Solver statuses: " + str(R["statuses"])
+                       + "  |  enforced T_min = " + format(float(R.get("T_min_eff", 0)), ".2f") + " C")
         st.download_button("Download table3_no_mpc.csv", R["t3"].to_csv(index=False).encode(),
                            file_name="table3_no_mpc.csv", key="dl_t3")
         st.subheader("Alpha-ablation -- comfort in-window")
