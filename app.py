@@ -264,6 +264,12 @@ def tab_single():
     enforce_hard = st.checkbox("Hard guest comfort (alpha derived from intent)",
                                value=True)
     N_s = st.slider("Scenarios N_s", 1, 32, 8)
+    gate_on = st.checkbox("Apply the ask-versus-act gate before optimizing",
+                          value=True,
+                          help="Section 4.3: if vague, conflict or underspec "
+                               "fires, the system asks one clarifying question "
+                               "instead of scheduling. Uncheck only to inspect "
+                               "what an ungated pipeline would have produced.")
 
     utterance = st.text_input("Utterance",
         value="Guests coming over tonight, keep it warm but watch the bill.")
@@ -292,6 +298,52 @@ def tab_single():
                 theta = crisp_map(intent_dict)
 
             theta["_intent"] = intent_dict
+
+            # ---- ask-versus-act gate (Section 4.3) --------------------
+            # The policy asks one clarifying question when the intent is
+            # vague, self-conflicting or underspecified. Optimizing anyway
+            # would contradict the stated pipeline, so the run stops here
+            # and the missing field is requested.
+            if gate_on and int(intent_dict.get("clarification_needed", 0)) == 1:
+                st.warning("**Clarification required - not scheduled.**  The "
+                           "ask-versus-act policy of Section 4.3 fired on this "
+                           "utterance, so the pipeline asks one question "
+                           "instead of committing a schedule.")
+                # Identify which predicate fired, so the question is the one
+                # the policy actually implies rather than a generic prompt.
+                _u = utterance.lower()
+                _HEDGE = ("tonight", "later", "soon", "evening", "around",
+                          "before bed")
+                _vague = (any(t in _u for t in _HEDGE)
+                          and intent_dict.get("window_start") is None)
+                _conflict = (("max comfort" in _u or "warm" in _u)
+                             and ("cheapest" in _u or "lowest cost" in _u))
+                _fired = []
+                if _vague:
+                    _fired.append("vague: a temporal hedge was detected but no "
+                                  "hour could be resolved")
+                if _conflict:
+                    _fired.append("conflict: the request both maximises comfort "
+                                  "and minimises cost")
+                if not _fired:
+                    _fired.append("underspec: a field required by the operating "
+                                  "context is missing")
+                if _vague:
+                    _q = ("Which hours would you like kept comfortable "
+                          "(for example 19:00 to 23:00)?")
+                elif _conflict:
+                    _q = ("Should I prioritise keeping it warm, or keeping the "
+                          "bill down, if the two conflict?")
+                else:
+                    _q = ("Could you specify the missing detail for this "
+                          "request?")
+                st.write("Predicate(s) fired: " + "; ".join(_fired))
+                st.info("Question to the occupant: " + str(_q))
+                st.caption("Parsed intent below. Answer the question, or "
+                           "uncheck the gate to inspect what an ungated "
+                           "pipeline would have produced.")
+                st.json(intent_dict)
+                return
 
         alpha = alpha_from_intent(intent_dict) if enforce_hard else 1.0
 
