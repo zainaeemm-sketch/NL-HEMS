@@ -299,6 +299,26 @@ def tab_single():
 
             theta["_intent"] = intent_dict
 
+            # ---- deterministic temporal resolution --------------------
+            # Resolve common temporal expressions to hours when the parser
+            # did not. The rule-based parsers already do this; an LLM
+            # backend often returns no window, which would otherwise make
+            # the vague predicate fire on a perfectly resolvable phrase.
+            # Applying it here keeps the pipeline's behaviour independent
+            # of which backend produced the intent.
+            _ul = utterance.lower()
+            if intent_dict.get("window_start") is None:
+                for _kws, _w in ((("tonight", "evening", "dinner"), (19, 23)),
+                                 (("morning",), (7, 11)),
+                                 (("after work",), (18, 22)),
+                                 (("afternoon",), (13, 17))):
+                    if any(k in _ul for k in _kws):
+                        intent_dict["window_start"], intent_dict["window_end"] = _w
+                        st.caption("Temporal expression resolved "
+                                   "deterministically to hours "
+                                   + str(_w[0]) + "-" + str(_w[1]) + ".")
+                        break
+
             # ---- ask-versus-act gate (Section 4.3) --------------------
             # The predicates are deterministic lexical rules, so they are
             # evaluated here for EVERY parser rather than trusting a model's
