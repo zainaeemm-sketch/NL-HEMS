@@ -300,34 +300,33 @@ def tab_single():
             theta["_intent"] = intent_dict
 
             # ---- ask-versus-act gate (Section 4.3) --------------------
-            # The policy asks one clarifying question when the intent is
-            # vague, self-conflicting or underspecified. Optimizing anyway
-            # would contradict the stated pipeline, so the run stops here
-            # and the missing field is requested.
-            if gate_on and int(intent_dict.get("clarification_needed", 0)) == 1:
-                st.warning("**Clarification required - not scheduled.**  The "
-                           "ask-versus-act policy of Section 4.3 fired on this "
-                           "utterance, so the pipeline asks one question "
-                           "instead of committing a schedule.")
-                # Identify which predicate fired, so the question is the one
-                # the policy actually implies rather than a generic prompt.
-                _u = utterance.lower()
-                _HEDGE = ("tonight", "later", "soon", "evening", "around",
-                          "before bed")
-                _vague = (any(t in _u for t in _HEDGE)
+            # The predicates are deterministic lexical rules, so they are
+            # evaluated here for EVERY parser rather than trusting a model's
+            # self-reported clarification flag. A parser that sets the flag
+            # itself is honoured as well (logical OR).
+            _u = utterance.lower()
+            _HEDGE = ("tonight", "later", "soon", "evening", "around",
+                      "before bed")
+            _K_COMF = ("max comfort", "warm")
+            _K_COST = ("cheapest", "lowest cost")
+            _vague = (any(t in _u for t in _HEDGE)
+                      and intent_dict.get("window_start") is None)
+            _conflict = (any(t in _u for t in _K_COMF)
+                         and any(t in _u for t in _K_COST))
+            _underspec = (int(intent_dict.get("dr_flag", 0)) == 1
                           and intent_dict.get("window_start") is None)
-                _conflict = (("max comfort" in _u or "warm" in _u)
-                             and ("cheapest" in _u or "lowest cost" in _u))
+            _self = int(intent_dict.get("clarification_needed", 0)) == 1
+
+            if gate_on and (_vague or _conflict or _underspec or _self):
                 _fired = []
                 if _vague:
-                    _fired.append("vague: a temporal hedge was detected but no "
-                                  "hour could be resolved")
+                    _fired.append("vague (temporal hedge, no resolvable hour)")
                 if _conflict:
-                    _fired.append("conflict: the request both maximises comfort "
-                                  "and minimises cost")
-                if not _fired:
-                    _fired.append("underspec: a field required by the operating "
-                                  "context is missing")
+                    _fired.append("conflict (maximise comfort and minimise cost)")
+                if _underspec:
+                    _fired.append("underspec (window required by the context)")
+                if _self and not (_vague or _conflict or _underspec):
+                    _fired.append("parser-reported clarification_needed")
                 if _vague:
                     _q = ("Which hours would you like kept comfortable "
                           "(for example 19:00 to 23:00)?")
@@ -337,10 +336,14 @@ def tab_single():
                 else:
                     _q = ("Could you specify the missing detail for this "
                           "request?")
+                st.warning("**Clarification required - not scheduled.**  The "
+                           "ask-versus-act policy of Section 4.3 fired, so the "
+                           "pipeline asks one question instead of committing "
+                           "a schedule.")
                 st.write("Predicate(s) fired: " + "; ".join(_fired))
                 st.info("Question to the occupant: " + str(_q))
                 st.caption("Parsed intent below. Answer the question, or "
-                           "uncheck the gate to inspect what an ungated "
+                           "untick the gate to inspect what an ungated "
                            "pipeline would have produced.")
                 st.json(intent_dict)
                 return
